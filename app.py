@@ -59,7 +59,7 @@ MAX_TOP_HOLDER = float(os.getenv("MAX_TOP_HOLDER_PERCENT", 15))
 MAX_SIGNALS_PER_HOUR = int(os.getenv("MAX_SIGNALS_PER_HOUR", 3))
 COOLDOWN_SEC = int(os.getenv("COOLDOWN_BETWEEN_POSTS_SEC", 180))
 DB_PATH = os.getenv("DATABASE_PATH", "./data/sentinel.db")
-LOG_LEVEL = os.getenv("LOG_LEVEL", "DEBUG")  # DEBUG for troubleshooting
+LOG_LEVEL = os.getenv("LOG_LEVEL", "DEBUG")
 LOG_FILE = os.getenv("LOG_FILE", "./logs/sentinel.log")
 
 # Create directories
@@ -260,7 +260,7 @@ class ConvictionFilter:
         return score, reasons
 
 # ============================================================================
-# BIRDEYE MONITOR (with WS fix from previous step)
+# BIRDEYE MONITOR (with previous WS fix)
 # ============================================================================
 
 class BirdeyeMonitor:
@@ -284,9 +284,7 @@ class BirdeyeMonitor:
                 async with websockets.connect(
                     ws_url,
                     subprotocols=["echo-protocol"],
-                    additional_headers={
-                        "Origin": "https://birdeye.so",
-                    },
+                    additional_headers={"Origin": "https://birdeye.so"},
                     ping_interval=30,
                     ping_timeout=10
                 ) as ws:
@@ -488,14 +486,14 @@ class PumpFunMonitor:
                 "order": "DESC"
             }
             
-            # FIXED: Added User-Agent header to bypass Cloudflare 530 block
+            # FIXED: Added User-Agent to bypass Cloudflare 530
             headers = {
                 "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
             }
             
             async with self.session.get(url, params=params, headers=headers, timeout=15) as resp:
                 if resp.status != 200:
-                    logger.error(f"Pump.fun returned {resp.status}: {await resp.text()}")
+                    logger.error(f"Pump.fun returned {resp.status}: {await resp.text()[:200]}")
                     return []
                 
                 data = await resp.json()
@@ -555,7 +553,7 @@ class PumpFunMonitor:
             await self.session.close()
 
 # ============================================================================
-# TELEGRAM PUBLISHER (unchanged)
+# TELEGRAM PUBLISHER
 # ============================================================================
 
 class TelegramPublisher:
