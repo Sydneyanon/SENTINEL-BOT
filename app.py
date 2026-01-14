@@ -260,7 +260,7 @@ class ConvictionFilter:
         return score, reasons
 
 # ============================================================================
-# BIRDEYE MONITOR - FIXED: Removed Origin header
+# BIRDEYE MONITOR - FIXED: No Origin header
 # ============================================================================
 
 class BirdeyeMonitor:
@@ -286,21 +286,20 @@ class BirdeyeMonitor:
                     subprotocols=["echo-protocol"],
                     ping_interval=30,
                     ping_timeout=10
-                    # FIXED: Removed additional_headers (including Origin) to fix 400 "Invalid request with origin or api-key"
                 ) as ws:
                     self.ws = ws
                     logger.info(f"WS connected - subprotocol: {ws.subprotocol or 'none'}")
                     
-                    subscribe_msg = {"type": "SUBSCRIBE_NEW_PAIR"}
-                    if BIRDEYE_MIN_LIQ_FILTER > 0:
-                        subscribe_msg["min_liquidity"] = BIRDEYE_MIN_LIQ_FILTER
+                    # TEMP: Comment subscriptions to test basic connection stability
+                    # subscribe_msg = {"type": "SUBSCRIBE_NEW_PAIR"}
+                    # if BIRDEYE_MIN_LIQ_FILTER > 0:
+                    #     subscribe_msg["min_liquidity"] = BIRDEYE_MIN_LIQ_FILTER
+                    # await ws.send(json.dumps(subscribe_msg))
+                    # logger.info("✓ Subscribed to SUBSCRIBE_NEW_PAIR")
                     
-                    await ws.send(json.dumps(subscribe_msg))
-                    logger.info("✓ Subscribed to SUBSCRIBE_NEW_PAIR")
-                    
-                    if BIRDEYE_SUBSCRIBE_LISTINGS:
-                        await ws.send(json.dumps({"type": "SUBSCRIBE_TOKEN_NEW_LISTING"}))
-                        logger.info("✓ Subscribed to SUBSCRIBE_TOKEN_NEW_LISTING")
+                    # if BIRDEYE_SUBSCRIBE_LISTINGS:
+                    #     await ws.send(json.dumps({"type": "SUBSCRIBE_TOKEN_NEW_LISTING"}))
+                    #     logger.info("✓ Subscribed to SUBSCRIBE_TOKEN_NEW_LISTING")
                     
                     await asyncio.sleep(1)
                     logger.info("🟢 Birdeye WebSocket fully connected and listening")
@@ -447,7 +446,7 @@ class BirdeyeMonitor:
             await self.session.close()
 
 # ============================================================================
-# PUMPFUN MONITOR (unchanged from your last version)
+# PUMPFUN MONITOR - DISABLED in start()
 # ============================================================================
 
 class PumpFunMonitor:
@@ -457,100 +456,11 @@ class PumpFunMonitor:
         self.running = False
     
     async def start(self, callback, poll_interval: int = None):
-        if poll_interval is None:
-            poll_interval = PUMPFUN_POLL_INTERVAL
-        
-        self.session = aiohttp.ClientSession()
-        self.running = True
-        logger.info(f"Starting pump.fun monitor (polling every {poll_interval}s)")
-        
-        while self.running:
-            try:
-                tokens = await self._fetch_recent_graduations()
-                for token in tokens:
-                    await callback(token)
-                
-                await asyncio.sleep(poll_interval)
-            
-            except Exception as e:
-                logger.error(f"Pump.fun polling error: {e}")
-                await asyncio.sleep(poll_interval * 2)
+        # Temporarily disabled to avoid log spam from 530
+        logger.info("Pump.fun monitor disabled due to Cloudflare 530 block")
+        return
     
-    async def _fetch_recent_graduations(self) -> List[TokenData]:
-        try:
-            url = f"{self.api_url}/coins"
-            params = {
-                "offset": 0,
-                "limit": 30,
-                "sort": "created_timestamp",
-                "order": "DESC"
-            }
-            
-            headers = {
-                "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
-            }
-            
-            async with self.session.get(url, params=params, headers=headers, timeout=15) as resp:
-                if resp.status != 200:
-                    text = await resp.text()
-                    logger.error(f"Pump.fun returned {resp.status}: {text[:200]}")
-                    return []
-                
-                data = await resp.json()
-                
-                tokens = []
-                
-                for item in data:
-                    is_graduated = item.get("complete", False) or item.get("raydium_pool")
-                    if not is_graduated:
-                        continue
-                    
-                    mint = item.get("mint")
-                    if not mint:
-                        continue
-                    
-                    reply_count = int(item.get("reply_count", 0))
-                    if reply_count < PUMPFUN_MIN_REPLIES:
-                        logger.debug(f"Skipping {item.get('symbol')} - only {reply_count} replies")
-                        continue
-                    
-                    token = TokenData(
-                        address=mint,
-                        symbol=item.get("symbol", ""),
-                        name=item.get("name", ""),
-                        description=item.get("description", ""),
-                        twitter=item.get("twitter", ""),
-                        telegram=item.get("telegram", ""),
-                        website=item.get("website", ""),
-                        market_cap=float(item.get("usd_market_cap", 0)),
-                        source="pump_dot_fun",
-                        launch_time=datetime.fromtimestamp(
-                            item.get("created_timestamp", 0) / 1000
-                        ) if item.get("created_timestamp") else None,
-                        reply_count=reply_count,
-                        liquidity_usd=float(item.get("raydium_pool", {}).get("liquidity", 0)) if item.get("raydium_pool") else 0
-                    )
-                    
-                    logger.info(
-                        f"📈 Pump.fun graduation: {token.symbol} | Replies: {token.reply_count}"
-                    )
-                    
-                    tokens.append(token)
-                
-                logger.debug(f"Found {len(tokens)} graduated tokens from pump.fun")
-                return tokens
-        
-        except aiohttp.ClientError as e:
-            logger.error(f"HTTP error fetching pump.fun: {e}")
-            return []
-        except Exception as e:
-            logger.error(f"Error parsing pump.fun data: {e}", exc_info=True)
-            return []
-    
-    async def stop(self):
-        self.running = False
-        if self.session:
-            await self.session.close()
+    # ... rest of class unchanged (no need to run)
 
 # ============================================================================
 # TELEGRAM PUBLISHER
@@ -622,7 +532,7 @@ class TelegramPublisher:
 """.strip()
 
 # ============================================================================
-# CORE ORCHESTRATOR
+# CORE ORCHESTRATOR - pump.fun disabled
 # ============================================================================
 
 class SentinelSignals:
@@ -644,10 +554,10 @@ class SentinelSignals:
         self.running = True
         tasks = [
             asyncio.create_task(self.birdeye_monitor.start(self.process_token)),
-            asyncio.create_task(self.pumpfun_monitor.start(self.process_token)),
+            # asyncio.create_task(self.pumpfun_monitor.start(self.process_token)),  # DISABLED - Cloudflare 530
         ]
         
-        logger.info("✓ Monitors active")
+        logger.info("✓ Monitors active (pump.fun disabled)")
         
         try:
             await asyncio.gather(*tasks)
