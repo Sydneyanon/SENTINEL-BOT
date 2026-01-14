@@ -1,4 +1,4 @@
-  """
+"""
 Sentinel Signals - Elite Solana Memecoin Signal Bot
 Architecture: Async WebSocket monitor → Multi-tier filters → Telegram publisher
 Author: Built for high-conviction signals (5-15/day win rate optimization)
