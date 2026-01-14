@@ -492,7 +492,8 @@ class PumpFunMonitor:
             
             async with self.session.get(url, params=params, headers=headers, timeout=15) as resp:
                 if resp.status != 200:
-                    text = await resp.text()  # FIXED: await first
+                    # FIXED: await text first, then slice
+                    text = await resp.text()
                     logger.error(f"Pump.fun returned {resp.status}: {text[:200]}")
                     return []
                 
