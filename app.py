@@ -260,7 +260,7 @@ class ConvictionFilter:
         return score, reasons
 
 # ============================================================================
-# BIRDEYE MONITOR
+# BIRDEYE MONITOR - FIXED: Removed Origin header
 # ============================================================================
 
 class BirdeyeMonitor:
@@ -284,9 +284,9 @@ class BirdeyeMonitor:
                 async with websockets.connect(
                     ws_url,
                     subprotocols=["echo-protocol"],
-                    additional_headers={"Origin": "https://birdeye.so"},
                     ping_interval=30,
                     ping_timeout=10
+                    # FIXED: Removed additional_headers (including Origin) to fix 400 "Invalid request with origin or api-key"
                 ) as ws:
                     self.ws = ws
                     logger.info(f"WS connected - subprotocol: {ws.subprotocol or 'none'}")
@@ -447,7 +447,7 @@ class BirdeyeMonitor:
             await self.session.close()
 
 # ============================================================================
-# PUMPFUN MONITOR - FIXED with User-Agent + correct await/text slice
+# PUMPFUN MONITOR (unchanged from your last version)
 # ============================================================================
 
 class PumpFunMonitor:
@@ -492,7 +492,6 @@ class PumpFunMonitor:
             
             async with self.session.get(url, params=params, headers=headers, timeout=15) as resp:
                 if resp.status != 200:
-                    # FIXED: await text first, then slice
                     text = await resp.text()
                     logger.error(f"Pump.fun returned {resp.status}: {text[:200]}")
                     return []
