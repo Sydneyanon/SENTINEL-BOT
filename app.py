@@ -362,7 +362,7 @@ class BirdeyeMonitor:
                 
                 async with websockets.connect(
                     ws_url,
-                    extra_headers={
+                    additional_headers={
                         "Sec-WebSocket-Protocol": "echo-protocol",
                         "Origin": "https://birdeye.so",  # Sometimes required by Birdeye
                     },
