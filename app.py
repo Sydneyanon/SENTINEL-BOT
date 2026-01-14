@@ -59,7 +59,7 @@ MAX_TOP_HOLDER = float(os.getenv("MAX_TOP_HOLDER_PERCENT", 15))
 MAX_SIGNALS_PER_HOUR = int(os.getenv("MAX_SIGNALS_PER_HOUR", 3))
 COOLDOWN_SEC = int(os.getenv("COOLDOWN_BETWEEN_POSTS_SEC", 180))
 DB_PATH = os.getenv("DATABASE_PATH", "./data/sentinel.db")
-LOG_LEVEL = os.getenv("LOG_LEVEL", "DEBUG")  # DEBUG for detailed WS troubleshooting
+LOG_LEVEL = os.getenv("LOG_LEVEL", "DEBUG")  # DEBUG for troubleshooting
 LOG_FILE = os.getenv("LOG_FILE", "./logs/sentinel.log")
 
 # Create directories
@@ -86,7 +86,6 @@ logger = logging.getLogger("SentinelSignals")
 
 @dataclass
 class TokenData:
-    """Unified token data structure"""
     address: str
     symbol: str
     name: str
@@ -94,23 +93,15 @@ class TokenData:
     twitter: str = ""
     telegram: str = ""
     website: str = ""
-    
-    # Market data
     liquidity_usd: float = 0.0
     volume_24h: float = 0.0
     market_cap: float = 0.0
     price_change_5m: float = 0.0
-    
-    # Launch metadata
     source: str = ""
     launch_time: Optional[datetime] = None
-    
-    # Social signals
     reply_count: int = 0
     holder_count: int = 0
     top_holder_percent: float = 0.0
-    
-    # Conviction score (0-100, calculated)
     conviction_score: float = 0.0
     conviction_reasons: List[str] = None
     
@@ -123,14 +114,11 @@ class TokenData:
 # ============================================================================
 
 class TokenDatabase:
-    """SQLite persistence for seen tokens and signal history"""
-    
     def __init__(self, db_path: str):
         self.db_path = db_path
         self.db: Optional[aiosqlite.Connection] = None
     
     async def connect(self):
-        """Initialize database with schema"""
         self.db = await aiosqlite.connect(self.db_path)
         await self.db.execute("""
             CREATE TABLE IF NOT EXISTS seen_tokens (
@@ -272,7 +260,7 @@ class ConvictionFilter:
         return score, reasons
 
 # ============================================================================
-# DATA SOURCES
+# BIRDEYE MONITOR (with WS fix from previous step)
 # ============================================================================
 
 class BirdeyeMonitor:
@@ -284,7 +272,6 @@ class BirdeyeMonitor:
         self.reconnect_count = 0
     
     async def start(self, callback):
-        """Connect to WebSocket and stream new tokens"""
         self.running = True
         self.session = aiohttp.ClientSession()
         
@@ -294,22 +281,17 @@ class BirdeyeMonitor:
                 
                 ws_url = f"{BIRDEYE_WS_URL}/solana?x-api-key={self.api_key}"
                 
-                # FIXED: Use subprotocols for "echo-protocol" negotiation (required by Birdeye)
-                # FIXED: Use additional_headers only for Origin (Sec-WebSocket-Protocol is now in subprotocols)
-                # FIXED: Added debug logging for subprotocol and pong messages
                 async with websockets.connect(
                     ws_url,
-                    subprotocols=["echo-protocol"],  # This sends Sec-WebSocket-Protocol: echo-protocol
+                    subprotocols=["echo-protocol"],
                     additional_headers={
-                        "Origin": "https://birdeye.so",  # Helps with server-side checks
+                        "Origin": "https://birdeye.so",
                     },
-                    ping_interval=30,  # Increased to reduce timeout risks
+                    ping_interval=30,
                     ping_timeout=10
                 ) as ws:
                     self.ws = ws
-                    
-                    # Log successful connection and negotiated subprotocol
-                    logger.info(f"WS connected successfully - negotiated subprotocol: {ws.subprotocol or 'none'}")
+                    logger.info(f"WS connected - subprotocol: {ws.subprotocol or 'none'}")
                     
                     subscribe_msg = {"type": "SUBSCRIBE_NEW_PAIR"}
                     if BIRDEYE_MIN_LIQ_FILTER > 0:
@@ -329,9 +311,8 @@ class BirdeyeMonitor:
                         if not self.running:
                             break
                         
-                        # FIXED: Handle ping/pong explicitly for debug
                         if message == "ping":
-                            logger.debug("Received ping from server, sending pong")
+                            logger.debug("Received ping, sending pong")
                             await ws.pong()
                             continue
                         
@@ -347,17 +328,17 @@ class BirdeyeMonitor:
                 self.reconnect_count += 1
                 close_code = self.ws.close_code if self.ws else "unknown"
                 close_reason = self.ws.close_reason if self.ws else "unknown"
-                logger.error(f"WebSocket error ({self.reconnect_count}/{WS_MAX_RECONNECTS}): {e} | Close code: {close_code} | Reason: {close_reason}")
+                logger.error(f"WS error ({self.reconnect_count}/{WS_MAX_RECONNECTS}): {e} | Close: {close_code} - {close_reason}")
                 
                 if self.reconnect_count >= WS_MAX_RECONNECTS:
-                    logger.critical("Max reconnect attempts reached! Check API key or Birdeye status")
+                    logger.critical("Max reconnects! Check API key/Birdeye")
                     await asyncio.sleep(60)
                     self.reconnect_count = 0
                 else:
                     await asyncio.sleep(WS_RECONNECT_DELAY * self.reconnect_count)
                     
             except Exception as e:
-                logger.error(f"Unexpected error in WS loop: {e}", exc_info=True)
+                logger.error(f"Unexpected WS loop error: {e}", exc_info=True)
                 await asyncio.sleep(WS_RECONNECT_DELAY)
             else:
                 self.reconnect_count = 0
@@ -374,7 +355,7 @@ class BirdeyeMonitor:
             mint_address = base.get("address") or payload.get("address")
             
             if not mint_address:
-                logger.warning(f"NEW_PAIR_DATA missing base.address: {payload}")
+                logger.warning(f"NEW_PAIR_DATA missing base.address")
                 return
             
             liquidity = float(payload.get("liquidity", 0))
@@ -394,7 +375,7 @@ class BirdeyeMonitor:
             mint_address = base.get("address") or payload.get("address")
             
             if not mint_address:
-                logger.warning(f"TOKEN_NEW_LISTING_DATA missing address: {payload}")
+                logger.warning(f"TOKEN_NEW_LISTING_DATA missing address")
                 return
             
             logger.info(f"🆕 New listing: {mint_address[:8]}... (pre-liquidity)")
@@ -402,24 +383,20 @@ class BirdeyeMonitor:
             token_data = await self._fetch_token_details(mint_address)
             if token_data:
                 if token_data.liquidity_usd == 0:
-                    logger.debug(f"  ⚠️ {mint_address[:8]}... has no liquidity yet")
+                    logger.debug(f"  ⚠️ No liquidity yet")
                 await callback(token_data)
         
         elif event_type == "HEARTBEAT":
-            logger.debug("💓 WebSocket heartbeat")
+            logger.debug("💓 WS heartbeat")
         
         elif event_type == "ERROR":
             logger.error(f"Birdeye WS error: {data}")
         
         else:
             if event_type and event_type not in ["PRICE_UPDATE"]:
-                logger.debug(f"Unhandled event type: {event_type}")
+                logger.debug(f"Unhandled event: {event_type}")
     
-    @retry(
-        stop=stop_after_attempt(3),
-        wait=wait_exponential(multiplier=1, min=2, max=10),
-        retry=retry_if_exception_type(aiohttp.ClientError)
-    )
+    @retry(stop=stop_after_attempt(3), wait=wait_exponential(multiplier=1, min=2, max=10), retry=retry_if_exception_type(aiohttp.ClientError))
     async def _fetch_token_details(self, address: str) -> Optional[TokenData]:
         try:
             url = f"{BIRDEYE_API_URL}/defi/token_overview"
@@ -428,7 +405,7 @@ class BirdeyeMonitor:
             
             async with self.session.get(url, params=params, headers=headers, timeout=10) as resp:
                 if resp.status == 429:
-                    logger.warning("Birdeye rate limit hit, backing off...")
+                    logger.warning("Birdeye rate limit, backing off...")
                     await asyncio.sleep(5)
                     return None
                 
@@ -457,7 +434,6 @@ class BirdeyeMonitor:
                     top_holder_percent=float(token_info.get("top10HolderPercent", 0)),
                     launch_time=datetime.fromtimestamp(token_info.get("createdAt", 0)) if token_info.get("createdAt") else None
                 )
-        
         except aiohttp.ClientError as e:
             logger.error(f"API error fetching {address}: {e}")
             raise
@@ -473,7 +449,7 @@ class BirdeyeMonitor:
             await self.session.close()
 
 # ============================================================================
-# PUMP.FUN MONITOR (unchanged)
+# PUMPFUN MONITOR - FIXED with User-Agent header
 # ============================================================================
 
 class PumpFunMonitor:
@@ -512,8 +488,16 @@ class PumpFunMonitor:
                 "order": "DESC"
             }
             
-            async with self.session.get(url, params=params, timeout=15, headers={"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"}  as resp:
-                resp.raise_for_status()
+            # FIXED: Added User-Agent header to bypass Cloudflare 530 block
+            headers = {
+                "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
+            }
+            
+            async with self.session.get(url, params=params, headers=headers, timeout=15) as resp:
+                if resp.status != 200:
+                    logger.error(f"Pump.fun returned {resp.status}: {await resp.text()}")
+                    return []
+                
                 data = await resp.json()
                 
                 tokens = []
@@ -550,9 +534,7 @@ class PumpFunMonitor:
                     )
                     
                     logger.info(
-                        f"📈 Pump.fun graduation: {token.symbol} | "
-                        f"Replies: {token.reply_count} | "
-                        f"Created: {token.launch_time.strftime('%H:%M') if token.launch_time else 'unknown'}"
+                        f"📈 Pump.fun graduation: {token.symbol} | Replies: {token.reply_count}"
                     )
                     
                     tokens.append(token)
@@ -561,7 +543,7 @@ class PumpFunMonitor:
                 return tokens
         
         except aiohttp.ClientError as e:
-            logger.error(f"HTTP error fetching pump.fun graduations: {e}")
+            logger.error(f"HTTP error fetching pump.fun: {e}")
             return []
         except Exception as e:
             logger.error(f"Error parsing pump.fun data: {e}", exc_info=True)
@@ -586,7 +568,7 @@ class TelegramPublisher:
         time_since_last = time.time() - self.last_post_time
         if time_since_last < COOLDOWN_SEC:
             wait_time = COOLDOWN_SEC - time_since_last
-            logger.info(f"Cooldown active, waiting {wait_time:.0f}s before posting...")
+            logger.info(f"Cooldown active, waiting {wait_time:.0f}s...")
             await asyncio.sleep(wait_time)
         
         message = self._format_message(token)
@@ -599,26 +581,17 @@ class TelegramPublisher:
                 disable_web_page_preview=False
             )
             self.last_post_time = time.time()
-            logger.info(f"✓ Posted signal: {token.symbol} (score: {token.conviction_score:.0f})")
-        
+            logger.info(f"✓ Posted: {token.symbol} (score: {token.conviction_score:.0f})")
         except Exception as e:
             logger.error(f"Failed to post {token.symbol}: {e}")
     
     def _format_message(self, token: TokenData) -> str:
-        if token.conviction_score >= 80:
-            conviction_emoji = "🔥🔥🔥"
-        elif token.conviction_score >= 65:
-            conviction_emoji = "🔥🔥"
-        else:
-            conviction_emoji = "🔥"
+        conviction_emoji = "🔥🔥🔥" if token.conviction_score >= 80 else "🔥🔥" if token.conviction_score >= 65 else "🔥"
         
         socials = []
-        if token.twitter:
-            socials.append(f"<a href='{token.twitter}'>Twitter</a>")
-        if token.telegram:
-            socials.append(f"<a href='{token.telegram}'>Telegram</a>")
-        if token.website:
-            socials.append(f"<a href='{token.website}'>Website</a>")
+        if token.twitter: socials.append(f"<a href='{token.twitter}'>Twitter</a>")
+        if token.telegram: socials.append(f"<a href='{token.telegram}'>Telegram</a>")
+        if token.website: socials.append(f"<a href='{token.website}'>Website</a>")
         social_links = " | ".join(socials) if socials else "N/A"
         
         dexscreener = f"https://dexscreener.com/solana/{token.address}"
@@ -626,7 +599,7 @@ class TelegramPublisher:
         
         reasons_text = "\n".join([f"  • {r}" for r in token.conviction_reasons[:5]])
         
-        message = f"""
+        return f"""
 {conviction_emoji} <b>HIGH CONVICTION SIGNAL</b> {conviction_emoji}
 
 <b>{token.name}</b> (${token.symbol})
@@ -647,13 +620,11 @@ class TelegramPublisher:
 <b>Liquidity:</b> ${token.liquidity_usd:,.0f}
 <b>24h Vol:</b> ${token.volume_24h:,.0f}
 
-⚠️ <b>DYOR:</b> This is not financial advice. Always research before buying. High risk = high reward. Never invest more than you can afford to lose.
+⚠️ <b>DYOR:</b> Not financial advice. High risk = high reward.
 """.strip()
-        
-        return message
 
 # ============================================================================
-# CORE ORCHESTRATOR (unchanged)
+# CORE ORCHESTRATOR
 # ============================================================================
 
 class SentinelSignals:
@@ -661,10 +632,8 @@ class SentinelSignals:
         self.db = TokenDatabase(DB_PATH)
         self.filter_engine = ConvictionFilter()
         self.publisher = TelegramPublisher(TELEGRAM_TOKEN, CHANNEL_ID)
-        
         self.birdeye_monitor = BirdeyeMonitor(BIRDEYE_API_KEY)
         self.pumpfun_monitor = PumpFunMonitor(PUMPFUN_API)
-        
         self.running = False
     
     async def start(self):
@@ -680,23 +649,23 @@ class SentinelSignals:
             asyncio.create_task(self.pumpfun_monitor.start(self.process_token)),
         ]
         
-        logger.info("✓ All monitors active. Hunting for smash signals...")
+        logger.info("✓ Monitors active")
         
         try:
             await asyncio.gather(*tasks)
         except KeyboardInterrupt:
-            logger.info("Shutdown signal received...")
+            logger.info("Shutdown...")
             await self.stop()
     
     async def process_token(self, token: TokenData):
         if await self.db.is_seen(token.address):
             return
         
-        logger.info(f"New token detected: {token.symbol} ({token.address[:8]}...)")
+        logger.info(f"New token: {token.symbol} ({token.address[:8]}...)")
         
         safe, reason = await self.filter_engine.safety_check(token)
         if not safe:
-            logger.debug(f"  ✗ {token.symbol} filtered: {reason}")
+            logger.debug(f"  ✗ Filtered: {reason}")
             await self.db.mark_seen(token, posted=False)
             return
         
@@ -704,34 +673,32 @@ class SentinelSignals:
         token.conviction_score = score
         token.conviction_reasons = reasons
         
-        logger.info(f"  ✓ {token.symbol} scored {score:.0f}/100")
+        logger.info(f"  ✓ Scored {score:.0f}/100")
         
         if score < 60:
-            logger.info(f"  ✗ {token.symbol} below threshold (60)")
+            logger.info(f"  ✗ Below threshold")
             await self.db.mark_seen(token, posted=False)
             return
         
         recent_posts = await self.db.get_recent_posts_count(hours=1)
         if recent_posts >= MAX_SIGNALS_PER_HOUR:
-            logger.warning(f"  ⏸ Hourly limit reached ({recent_posts}/{MAX_SIGNALS_PER_HOUR})")
+            logger.warning(f"  ⏸ Hourly limit")
             await self.db.mark_seen(token, posted=False)
             return
         
         try:
             await self.publisher.publish_signal(token)
             await self.db.mark_seen(token, posted=True)
-            logger.info(f"  🚀 SIGNAL POSTED: {token.symbol}")
+            logger.info(f"  🚀 Posted: {token.symbol}")
         except Exception as e:
-            logger.error(f"  ✗ Failed to publish {token.symbol}: {e}")
+            logger.error(f"  ✗ Publish failed: {e}")
     
     async def stop(self):
         logger.info("Shutting down...")
         self.running = False
-        
         await self.birdeye_monitor.stop()
         await self.pumpfun_monitor.stop()
         await self.db.close()
-        
         logger.info("✓ Shutdown complete")
 
 # ============================================================================
@@ -740,8 +707,7 @@ class SentinelSignals:
 
 async def main():
     if not all([TELEGRAM_TOKEN, CHANNEL_ID, BIRDEYE_API_KEY]):
-        logger.error("Missing required environment variables!")
-        logger.error("Required: TELEGRAM_BOT_TOKEN, TELEGRAM_CHANNEL_ID, BIRDEYE_API_KEY")
+        logger.error("Missing env vars")
         sys.exit(1)
     
     sentinel = SentinelSignals()
@@ -757,5 +723,5 @@ if __name__ == "__main__":
     try:
         asyncio.run(main())
     except KeyboardInterrupt:
-        logger.info("Interrupted by user")
+        logger.info("Interrupted")
         sys.exit(0)
