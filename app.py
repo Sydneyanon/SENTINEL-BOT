@@ -582,6 +582,27 @@ class SentinelSignals:
         token.conviction_reasons = reasons
         
         logger.info(f"  ✓ Scored {score:.0f}/100")
+
+        # TEMP TEST: Force a high-conviction signal to confirm Telegram posting works
+        # Remove or comment out after confirming it posts to your channel
+        token.conviction_score = 95
+        token.conviction_reasons = ["TEST SIGNAL: Bot is live & WS is connected!"]
+        token.symbol = "TESTWIN"
+        token.name = "Sentinel Test Win"
+        token.address = "SentinelTestCA1234567890123456789"
+        token.liquidity_usd = 15000
+        token.volume_24h = 45000
+        token.source = "test"
+
+        logger.info("TEMP: Forcing test signal to Telegram channel")
+
+        # Optionally bypass rate limit / cooldown for test
+        # (uncomment if it doesn't post due to limits)
+        # self.publisher.last_post_time = 0  # reset cooldown
+
+        await self.publisher.publish_signal(token)
+        await self.db.mark_seen(token, posted=True)
+        logger.info("TEMP TEST SIGNAL POSTED SUCCESSFULLY")        
         
         if score < 60:
             logger.info(f"  ✗ Below threshold")
