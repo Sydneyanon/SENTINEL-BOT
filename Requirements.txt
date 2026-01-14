@@ -1,4 +1,4 @@
-aiogram==3.13.1  # or latest stable
+aiogram
 aiohttp
 aiosqlite
 websockets
