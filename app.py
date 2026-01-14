@@ -260,7 +260,7 @@ class ConvictionFilter:
         return score, reasons
 
 # ============================================================================
-# BIRDEYE MONITOR (with previous WS fix)
+# BIRDEYE MONITOR
 # ============================================================================
 
 class BirdeyeMonitor:
@@ -447,7 +447,7 @@ class BirdeyeMonitor:
             await self.session.close()
 
 # ============================================================================
-# PUMPFUN MONITOR - FIXED with User-Agent header
+# PUMPFUN MONITOR - FIXED with User-Agent + correct await/text slice
 # ============================================================================
 
 class PumpFunMonitor:
@@ -486,14 +486,14 @@ class PumpFunMonitor:
                 "order": "DESC"
             }
             
-            # FIXED: Added User-Agent to bypass Cloudflare 530
             headers = {
                 "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
             }
             
             async with self.session.get(url, params=params, headers=headers, timeout=15) as resp:
                 if resp.status != 200:
-                    logger.error(f"Pump.fun returned {resp.status}: {await resp.text()[:200]}")
+                    text = await resp.text()  # FIXED: await first
+                    logger.error(f"Pump.fun returned {resp.status}: {text[:200]}")
                     return []
                 
                 data = await resp.json()
