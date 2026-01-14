@@ -2,6 +2,7 @@
 Sentinel Signals - Elite Solana Memecoin Signal Bot
 Architecture: Async WebSocket monitor → Multi-tier filters → Telegram publisher
 Author: Built for high-conviction signals (5-15/day win rate optimization)
+Railway Deployment: Production ready with healthchecks and graceful shutdown
 """
 
 import os
@@ -10,6 +11,7 @@ import asyncio
 import json
 import time
 import logging
+import signal
 from datetime import datetime, timedelta
 from typing import Dict, Optional, List, Set
 from dataclasses import dataclass, asdict
@@ -22,6 +24,20 @@ from aiogram import Bot
 from aiogram.enums import ParseMode
 from dotenv import load_dotenv
 from tenacity import retry, stop_after_attempt, wait_exponential, retry_if_exception_type
+from aiohttp import web
+
+# ============================================================================
+# SIGNAL HANDLING FOR RAILWAY GRACEFUL SHUTDOWN
+# ============================================================================
+
+def signal_handler(signum, frame):
+    """Handle SIGTERM from Railway for graceful shutdown"""
+    logger = logging.getLogger("SentinelSignals")
+    logger.info(f"Received signal {signum}, initiating graceful shutdown...")
+    raise KeyboardInterrupt
+
+signal.signal(signal.SIGTERM, signal_handler)
+signal.signal(signal.SIGINT, signal_handler)
 
 # ============================================================================
 # CONFIGURATION & INITIALIZATION
@@ -59,19 +75,29 @@ MAX_TOP_HOLDER = float(os.getenv("MAX_TOP_HOLDER_PERCENT", 15))
 MAX_SIGNALS_PER_HOUR = int(os.getenv("MAX_SIGNALS_PER_HOUR", 3))
 COOLDOWN_SEC = int(os.getenv("COOLDOWN_BETWEEN_POSTS_SEC", 180))
 DB_PATH = os.getenv("DATABASE_PATH", "./data/sentinel.db")
-LOG_LEVEL = os.getenv("LOG_LEVEL", "DEBUG")
+LOG_LEVEL = os.getenv("LOG_LEVEL", "INFO")
 LOG_FILE = os.getenv("LOG_FILE", "./logs/sentinel.log")
+HEALTHCHECK_PORT = int(os.getenv("PORT", 8080))
 
-# Create directories
-Path(DB_PATH).parent.mkdir(parents=True, exist_ok=True)
-Path(LOG_FILE).parent.mkdir(parents=True, exist_ok=True)
+# Create directories with error handling for Railway
+try:
+    db_dir = Path(DB_PATH).parent
+    db_dir.mkdir(parents=True, exist_ok=True)
+    log_dir = Path(LOG_FILE).parent
+    log_dir.mkdir(parents=True, exist_ok=True)
+except Exception as e:
+    print(f"Warning: Failed to create directories: {e}")
+    # Fallback to temp directory for Railway
+    DB_PATH = "/tmp/sentinel.db"
+    LOG_FILE = "/tmp/sentinel.log"
+    print(f"Using fallback paths: DB={DB_PATH}, LOG={LOG_FILE}")
 
 # ============================================================================
 # LOGGING SETUP
 # ============================================================================
 
 logging.basicConfig(
-    level=getattr(logging, LOG_LEVEL),
+    level=getattr(logging, LOG_LEVEL.upper(), logging.INFO),
     format='%(asctime)s | %(levelname)-8s | %(name)s | %(message)s',
     handlers=[
         logging.StreamHandler(sys.stdout),
@@ -260,7 +286,7 @@ class ConvictionFilter:
         return score, reasons
 
 # ============================================================================
-# BIRDEYE MONITOR - FIXED: No Origin header
+# BIRDEYE MONITOR - PRODUCTION READY
 # ============================================================================
 
 class BirdeyeMonitor:
@@ -290,16 +316,17 @@ class BirdeyeMonitor:
                     self.ws = ws
                     logger.info(f"WS connected - subprotocol: {ws.subprotocol or 'none'}")
                     
-                    # TEMP: Comment subscriptions to test basic connection stability
-                    # subscribe_msg = {"type": "SUBSCRIBE_NEW_PAIR"}
-                    # if BIRDEYE_MIN_LIQ_FILTER > 0:
-                    #     subscribe_msg["min_liquidity"] = BIRDEYE_MIN_LIQ_FILTER
-                    # await ws.send(json.dumps(subscribe_msg))
-                    # logger.info("✓ Subscribed to SUBSCRIBE_NEW_PAIR")
+                    # Subscribe to new pairs
+                    subscribe_msg = {"type": "SUBSCRIBE_NEW_PAIR"}
+                    if BIRDEYE_MIN_LIQ_FILTER > 0:
+                        subscribe_msg["min_liquidity"] = BIRDEYE_MIN_LIQ_FILTER
+                    await ws.send(json.dumps(subscribe_msg))
+                    logger.info("✓ Subscribed to SUBSCRIBE_NEW_PAIR")
                     
-                    # if BIRDEYE_SUBSCRIBE_LISTINGS:
-                    #     await ws.send(json.dumps({"type": "SUBSCRIBE_TOKEN_NEW_LISTING"}))
-                    #     logger.info("✓ Subscribed to SUBSCRIBE_TOKEN_NEW_LISTING")
+                    # Subscribe to new listings
+                    if BIRDEYE_SUBSCRIBE_LISTINGS:
+                        await ws.send(json.dumps({"type": "SUBSCRIBE_TOKEN_NEW_LISTING"}))
+                        logger.info("✓ Subscribed to SUBSCRIBE_TOKEN_NEW_LISTING")
                     
                     await asyncio.sleep(1)
                     logger.info("🟢 Birdeye WebSocket fully connected and listening")
@@ -328,7 +355,7 @@ class BirdeyeMonitor:
                 logger.error(f"WS error ({self.reconnect_count}/{WS_MAX_RECONNECTS}): {e} | Close: {close_code} - {close_reason}")
                 
                 if self.reconnect_count >= WS_MAX_RECONNECTS:
-                    logger.critical("Max reconnects! Check API key/Birdeye")
+                    logger.critical("Max reconnects reached! Check API key/Birdeye status")
                     await asyncio.sleep(60)
                     self.reconnect_count = 0
                 else:
@@ -446,7 +473,7 @@ class BirdeyeMonitor:
             await self.session.close()
 
 # ============================================================================
-# PUMPFUN MONITOR - DISABLED in start()
+# PUMPFUN MONITOR - DISABLED (Cloudflare blocks)
 # ============================================================================
 
 class PumpFunMonitor:
@@ -456,11 +483,14 @@ class PumpFunMonitor:
         self.running = False
     
     async def start(self, callback, poll_interval: int = None):
-        # Temporarily disabled to avoid log spam from 530
-        logger.info("Pump.fun monitor disabled due to Cloudflare 530 block")
+        logger.info("Pump.fun monitor disabled due to Cloudflare 530 blocks")
+        # Keep method for future re-enablement
         return
     
-    # ... rest of class unchanged (no need to run)
+    async def stop(self):
+        self.running = False
+        if self.session:
+            await self.session.close()
 
 # ============================================================================
 # TELEGRAM PUBLISHER
@@ -532,7 +562,35 @@ class TelegramPublisher:
 """.strip()
 
 # ============================================================================
-# CORE ORCHESTRATOR - pump.fun disabled
+# HEALTHCHECK SERVER FOR RAILWAY
+# ============================================================================
+
+async def healthcheck_server():
+    """Simple HTTP server for Railway healthchecks and monitoring"""
+    async def health(request):
+        return web.Response(text="OK - Sentinel Signals Running", status=200)
+    
+    async def stats(request):
+        # Optional: return bot statistics
+        return web.json_response({
+            "status": "running",
+            "service": "sentinel-signals",
+            "timestamp": datetime.now().isoformat()
+        })
+    
+    app = web.Application()
+    app.router.add_get('/health', health)
+    app.router.add_get('/stats', stats)
+    app.router.add_get('/', health)  # Railway sometimes checks root
+    
+    runner = web.AppRunner(app)
+    await runner.setup()
+    site = web.TCPSite(runner, '0.0.0.0', HEALTHCHECK_PORT)
+    await site.start()
+    logger.info(f"✓ Healthcheck server started on port {HEALTHCHECK_PORT}")
+
+# ============================================================================
+# CORE ORCHESTRATOR
 # ============================================================================
 
 class SentinelSignals:
@@ -546,7 +604,7 @@ class SentinelSignals:
     
     async def start(self):
         logger.info("=" * 60)
-        logger.info("SENTINEL SIGNALS - Starting up...")
+        logger.info("SENTINEL SIGNALS - Production Mode")
         logger.info("=" * 60)
         
         await self.db.connect()
@@ -554,15 +612,16 @@ class SentinelSignals:
         self.running = True
         tasks = [
             asyncio.create_task(self.birdeye_monitor.start(self.process_token)),
-            # asyncio.create_task(self.pumpfun_monitor.start(self.process_token)),  # DISABLED - Cloudflare 530
+            asyncio.create_task(healthcheck_server()),
         ]
         
-        logger.info("✓ Monitors active (pump.fun disabled)")
+        logger.info("✓ All systems operational (pump.fun disabled)")
+        logger.info(f"✓ Healthcheck: http://0.0.0.0:{HEALTHCHECK_PORT}/health")
         
         try:
             await asyncio.gather(*tasks)
         except KeyboardInterrupt:
-            logger.info("Shutdown...")
+            logger.info("Shutdown signal received...")
             await self.stop()
     
     async def process_token(self, token: TokenData):
@@ -582,48 +641,27 @@ class SentinelSignals:
         token.conviction_reasons = reasons
         
         logger.info(f"  ✓ Scored {score:.0f}/100")
-
-        # TEMP TEST: Force a high-conviction signal to confirm Telegram posting works
-        # Remove or comment out after confirming it posts to your channel
-        token.conviction_score = 95
-        token.conviction_reasons = ["TEST SIGNAL: Bot is live & WS is connected!"]
-        token.symbol = "TESTWIN"
-        token.name = "Sentinel Test Win"
-        token.address = "SentinelTestCA1234567890123456789"
-        token.liquidity_usd = 15000
-        token.volume_24h = 45000
-        token.source = "test"
-
-        logger.info("TEMP: Forcing test signal to Telegram channel")
-
-        # Optionally bypass rate limit / cooldown for test
-        # (uncomment if it doesn't post due to limits)
-        # self.publisher.last_post_time = 0  # reset cooldown
-
-        await self.publisher.publish_signal(token)
-        await self.db.mark_seen(token, posted=True)
-        logger.info("TEMP TEST SIGNAL POSTED SUCCESSFULLY")        
         
         if score < 60:
-            logger.info(f"  ✗ Below threshold")
+            logger.info(f"  ✗ Below threshold (60)")
             await self.db.mark_seen(token, posted=False)
             return
         
         recent_posts = await self.db.get_recent_posts_count(hours=1)
         if recent_posts >= MAX_SIGNALS_PER_HOUR:
-            logger.warning(f"  ⏸ Hourly limit")
+            logger.warning(f"  ⏸ Hourly limit reached ({recent_posts}/{MAX_SIGNALS_PER_HOUR})")
             await self.db.mark_seen(token, posted=False)
             return
         
         try:
             await self.publisher.publish_signal(token)
             await self.db.mark_seen(token, posted=True)
-            logger.info(f"  🚀 Posted: {token.symbol}")
+            logger.info(f"  🚀 POSTED: {token.symbol} | Score: {score:.0f}/100")
         except Exception as e:
             logger.error(f"  ✗ Publish failed: {e}")
     
     async def stop(self):
-        logger.info("Shutting down...")
+        logger.info("Shutting down gracefully...")
         self.running = False
         await self.birdeye_monitor.stop()
         await self.pumpfun_monitor.stop()
@@ -631,26 +669,55 @@ class SentinelSignals:
         logger.info("✓ Shutdown complete")
 
 # ============================================================================
-# ENTRY POINT
+# ENTRY POINT WITH AUTO-RECOVERY
 # ============================================================================
 
 async def main():
+    # Validate environment variables
     if not all([TELEGRAM_TOKEN, CHANNEL_ID, BIRDEYE_API_KEY]):
-        logger.error("Missing env vars")
+        logger.error("=" * 60)
+        logger.error("MISSING REQUIRED ENVIRONMENT VARIABLES")
+        logger.error("=" * 60)
+        logger.error(f"TELEGRAM_BOT_TOKEN: {'✓' if TELEGRAM_TOKEN else '✗ MISSING'}")
+        logger.error(f"TELEGRAM_CHANNEL_ID: {'✓' if CHANNEL_ID else '✗ MISSING'}")
+        logger.error(f"BIRDEYE_API_KEY: {'✓' if BIRDEYE_API_KEY else '✗ MISSING'}")
+        logger.error("=" * 60)
         sys.exit(1)
+    
+    logger.info("Environment variables validated ✓")
     
     sentinel = SentinelSignals()
     
-    try:
-        await sentinel.start()
-    except Exception as e:
-        logger.critical(f"Fatal error: {e}", exc_info=True)
-        sys.exit(1)
+    # Auto-recovery for Railway restarts
+    max_restarts = 3
+    restart_count = 0
+    
+    while restart_count < max_restarts:
+        try:
+            await sentinel.start()
+            break  # Clean exit
+        except KeyboardInterrupt:
+            logger.info("Shutdown requested by user/signal")
+            break
+        except Exception as e:
+            restart_count += 1
+            logger.critical(f"Fatal error (attempt {restart_count}/{max_restarts}): {e}", exc_info=True)
+            if restart_count < max_restarts:
+                logger.info(f"Attempting restart in 10 seconds...")
+                await asyncio.sleep(10)
+            else:
+                logger.critical("Max restart attempts reached. Exiting.")
+                sys.exit(1)
+    
+    await sentinel.stop()
 
 
 if __name__ == "__main__":
     try:
         asyncio.run(main())
     except KeyboardInterrupt:
-        logger.info("Interrupted")
+        logger.info("Process interrupted by user")
         sys.exit(0)
+    except Exception as e:
+        logger.critical(f"Unhandled exception in main: {e}", exc_info=True)
+        sys.exit(1)
