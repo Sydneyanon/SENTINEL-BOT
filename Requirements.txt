@@ -1,0 +1,6 @@
+aiogram
+aiohttp
+aiosqlite
+websockets
+python-dotenv
+tenacity
