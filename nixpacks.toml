@@ -1,0 +1,16 @@
+# nixpacks.toml - Fix pip not found on Railway Python deploys
+
+[phases.setup]
+nixPkgs = ['python312']
+
+[phases.install]
+cmds = [
+  "python3.12 -m ensurepip --upgrade --default-pip",
+  "python3.12 -m pip install --no-cache-dir --upgrade pip setuptools wheel"
+]
+
+[phases.build]
+cmds = ["python3.12 -m pip install --no-cache-dir -r requirements.txt"]
+
+[start]
+cmd = "python3.12 main.py"
