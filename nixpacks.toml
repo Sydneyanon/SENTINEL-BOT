@@ -1,0 +1,13 @@
+# nixpacks.toml - Explicit build config for Railway
+
+[phases.setup]
+nixPkgs = ['python312', 'python312Packages.pip']
+
+[phases.build]
+cmds = [
+  "python3.12 -m pip install --no-cache-dir --upgrade pip",
+  "python3.12 -m pip install --no-cache-dir -r requirements.txt"
+]
+
+[start]
+cmd = "python3.12 main.py"
