@@ -798,6 +798,14 @@ async def healthcheck_server():
     await site.start()
     logger.info(f"✓ Healthcheck on :{HEALTHCHECK_PORT}")
 
+async def publish_weekly_report(self, message: str):
+        """Post weekly performance report"""
+        try:
+            await self.bot.send_message(chat_id=self.channel_id, text=message, parse_mode=ParseMode.HTML, disable_web_page_preview=True)
+            logger.info("✓ Weekly report posted")
+        except Exception as e:
+            logger.error(f"Weekly report failed: {e}")
+
 # Main Orchestrator
 class SentinelSignals:
     def __init__(self):
