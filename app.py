@@ -384,6 +384,7 @@ class MLLearningEngine:
         accuracy = self.model.score(X_scaled, y)
         logger.info(f"✓ ML trained on {len(data)} samples, accuracy: {accuracy*100:.1f}%")
         return True
+
 class AIAnalysisEngine:
     def __init__(self, api_key: str, db: TokenDatabase):
         self.client = anthropic.Anthropic(api_key=api_key)
