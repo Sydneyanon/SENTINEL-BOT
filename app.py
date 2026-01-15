@@ -1,6 +1,6 @@
 """
-Sentinel Signals - DexScreener Edition with Advanced Features
-Full integrated version with ML, AI, Contract Scanner, Narrative & Dev Tracking
+Sentinel Signals - Full Integrated Version (Part 1/2)
+Copy this first, then append Part 2 below it
 """
 
 import os
@@ -76,29 +76,20 @@ PERFORMANCE_MILESTONES = [2.0, 3.0, 5.0]
 PERFORMANCE_DRAWDOWN_ALERT = -50.0
 WEEKLY_SUMMARY_HOUR = 0
 
-# AI Configuration
+# AI/ML/Scanner Config
 ANTHROPIC_API_KEY = os.getenv("ANTHROPIC_API_KEY")
 ENABLE_AI_ANALYSIS = os.getenv("ENABLE_AI_ANALYSIS", "true").lower() == "true"
 AI_CONFIDENCE_BOOST = float(os.getenv("AI_CONFIDENCE_BOOST", 10))
-
-# ML Configuration
 ENABLE_ML_LEARNING = os.getenv("ENABLE_ML_LEARNING", "true").lower() == "true"
 ML_MODEL_PATH = os.getenv("ML_MODEL_PATH", "./data/conviction_model.pkl")
 ML_SCALER_PATH = os.getenv("ML_SCALER_PATH", "./data/scaler.pkl")
 ML_MIN_TRAINING_SAMPLES = int(os.getenv("ML_MIN_TRAINING_SAMPLES", 50))
 ML_RETRAIN_INTERVAL_HOURS = int(os.getenv("ML_RETRAIN_INTERVAL_HOURS", 24))
-SUCCESS_THRESHOLD_PERCENT = float(os.getenv("SUCCESS_THRESHOLD_PERCENT", 50))
-SUCCESS_TIMEFRAME_HOURS = int(os.getenv("SUCCESS_TIMEFRAME_HOURS", 24))
-
-# Solana RPC
 SOLANA_RPC_URL = os.getenv("SOLANA_RPC_URL", "https://api.mainnet-beta.solana.com")
 ENABLE_CONTRACT_SCANNER = os.getenv("ENABLE_CONTRACT_SCANNER", "true").lower() == "true"
 ENABLE_NARRATIVE_TRACKER = os.getenv("ENABLE_NARRATIVE_TRACKER", "true").lower() == "true"
 ENABLE_DEV_TRACKER = os.getenv("ENABLE_DEV_TRACKER", "true").lower() == "true"
-
-# Scanner Weights
 CONTRACT_SAFETY_WEIGHT = float(os.getenv("CONTRACT_SAFETY_WEIGHT", 15))
-DEV_TRUST_WEIGHT = float(os.getenv("DEV_TRUST_WEIGHT", 10))
 NARRATIVE_BOOST_WEIGHT = float(os.getenv("NARRATIVE_BOOST_WEIGHT", 8))
 NARRATIVE_WINDOW_HOURS = int(os.getenv("NARRATIVE_WINDOW_HOURS", 24))
 DEV_MIN_SUCCESSFUL_LAUNCHES = int(os.getenv("DEV_MIN_SUCCESSFUL_LAUNCHES", 2))
@@ -180,7 +171,6 @@ class TokenDatabase:
     async def connect(self):
         self.db = await aiosqlite.connect(self.db_path)
         
-        # Original tables
         await self.db.execute("""
             CREATE TABLE IF NOT EXISTS seen_tokens (
                 address TEXT PRIMARY KEY,
@@ -201,8 +191,6 @@ class TokenDatabase:
                 FOREIGN KEY (address) REFERENCES seen_tokens(address)
             )
         """)
-        
-        # Follow-up tracking
         await self.db.execute("""
             CREATE TABLE IF NOT EXISTS tracked_tokens (
                 address TEXT PRIMARY KEY,
@@ -233,8 +221,6 @@ class TokenDatabase:
                 FOREIGN KEY (address) REFERENCES tracked_tokens(address)
             )
         """)
-        
-        # Performance tracking
         await self.db.execute("""
             CREATE TABLE IF NOT EXISTS performance_tracking (
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -249,8 +235,6 @@ class TokenDatabase:
                 FOREIGN KEY (address) REFERENCES tracked_tokens(address)
             )
         """)
-        
-        # ML Outcomes table
         await self.db.execute("""
             CREATE TABLE IF NOT EXISTS ml_outcomes (
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -264,8 +248,6 @@ class TokenDatabase:
                 FOREIGN KEY (address) REFERENCES tracked_tokens(address)
             )
         """)
-        
-        # AI Analysis cache
         await self.db.execute("""
             CREATE TABLE IF NOT EXISTS ai_analysis_cache (
                 address TEXT PRIMARY KEY,
@@ -275,8 +257,6 @@ class TokenDatabase:
                 analyzed_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
             )
         """)
-        
-        # Contract scans
         await self.db.execute("""
             CREATE TABLE IF NOT EXISTS contract_scans (
                 address TEXT PRIMARY KEY,
@@ -287,8 +267,6 @@ class TokenDatabase:
                 scanned_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
             )
         """)
-        
-        # Narrative tracking
         await self.db.execute("""
             CREATE TABLE IF NOT EXISTS narrative_tracking (
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -298,8 +276,6 @@ class TokenDatabase:
                 tracked_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
             )
         """)
-        
-        # Dev scans
         await self.db.execute("""
             CREATE TABLE IF NOT EXISTS dev_scans (
                 dev_wallet TEXT PRIMARY KEY,
@@ -310,7 +286,6 @@ class TokenDatabase:
                 scanned_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
             )
         """)
-        
         await self.db.commit()
         logger.info(f"Database initialized: {self.db_path}")
     
@@ -533,213 +508,6 @@ class TokenDatabase:
         if self.db:
             await self.db.close()
 
-class MLLearningEngine:
-    def __init__(self, db: TokenDatabase):
-        self.db = db
-        self.model = None
-        self.scaler = None
-        self.last_training = None
-    
-    async def initialize(self):
-        try:
-            with open(ML_MODEL_PATH, 'rb') as f:
-                self.model = pickle.load(f)
-            with open(ML_SCALER_PATH, 'rb') as f:
-                self.scaler = pickle.load(f)
-            logger.info("✓ ML model loaded")
-        except FileNotFoundError:
-            self.model = RandomForestClassifier(n_estimators=100, max_depth=10, random_state=42)
-            self.scaler = StandardScaler()
-    
-    async def predict_success_probability(self, token: TokenData) -> float:
-        if not self.model or not self.scaler:
-            return 0.5
-        features = np.array([[token.conviction_score, token.liquidity_usd, token.volume_24h,
-                            len(token.symbol), token.volume_24h / max(token.liquidity_usd, 1)]])
-        features_scaled = self.scaler.transform(features)
-        return self.model.predict_proba(features_scaled)[0][1]
-    
-    async def adjust_conviction_with_ml(self, token: TokenData, base_score: float) -> tuple[float, str]:
-        probability = await self.predict_success_probability(token)
-        ml_adjustment = (probability - 0.5) * 20
-        adjusted_score = max(0, min(100, base_score + ml_adjustment))
-        explanation = f"ML model: {probability*100:.0f}% success probability"
-        return adjusted_score, explanation
-
-class AIAnalysisEngine:
-    def __init__(self, api_key: str, db: TokenDatabase):
-        self.client = anthropic.Anthropic(api_key=api_key)
-        self.db = db
-    
-    async def analyze_token(self, token: TokenData) -> Dict:
-        prompt = f"""Analyze this Solana memecoin for investment risk:
-
-TOKEN: {token.name} (${token.symbol})
-DESCRIPTION: {token.description[:500] if token.description else "No description"}
-SOCIALS: Twitter: {"Yes" if token.twitter else "No"}, Telegram: {"Yes" if token.telegram else "No"}
-METRICS: Liquidity: ${token.liquidity_usd:,.0f}, Volume 24h: ${token.volume_24h:,.0f}
-
-Provide brief analysis in this format:
-RISK_SCORE: [0-100]
-CONFIDENCE_ADJUSTMENT: [-10 to +10]
-RED_FLAGS: [comma-separated or "none"]
-GREEN_FLAGS: [comma-separated or "none"]
-ANALYSIS: [2-3 sentences on legitimacy and rug risk]"""
-
-        try:
-            message = await asyncio.to_thread(
-                self.client.messages.create,
-                model="claude-3-5-sonnet-20241022",
-                max_tokens=500,
-                messages=[{"role": "user", "content": prompt}]
-            )
-            return self._parse_response(message.content[0].text)
-        except Exception as e:
-            logger.error(f"AI analysis error: {e}")
-            return {"risk_score": 50, "confidence_adjustment": 0, "analysis": "AI unavailable",
-                   "red_flags": [], "green_flags": []}
-    
-    def _parse_response(self, response: str) -> Dict:
-        result = {"risk_score": 50, "confidence_adjustment": 0, "analysis": "", "red_flags": [], "green_flags": []}
-        for line in response.strip().split('\n'):
-            if line.startswith("RISK_SCORE:"):
-                try: result["risk_score"] = float(line.split(':')[1].strip())
-                except: pass
-            elif line.startswith("CONFIDENCE_ADJUSTMENT:"):
-                try: result["confidence_adjustment"] = float(line.split(':')[1].strip())
-                except: pass
-            elif line.startswith("ANALYSIS:"):
-                result["analysis"] = line.split(':', 1)[1].strip()
-        return result
-
-class ContractRiskScanner:
-    def __init__(self, rpc_url: str, db: TokenDatabase):
-        self.client = AsyncClient(rpc_url, commitment=Confirmed)
-        self.db = db
-    
-    async def scan_token(self, address: str) -> Dict:
-        cached = await self.db.get_contract_scan(address)
-        if cached:
-            return {**cached, "green_flags": [], "explanation": "Cached"}
-        
-        try:
-            pubkey = Pubkey.from_string(address)
-            response = await self.client.get_account_info(pubkey)
-            if not response.value:
-                return {"safety_score": 0, "mint_revoked": False, "freeze_revoked": False,
-                       "red_flags": ["Token account not found"], "green_flags": [], "explanation": ""}
-            
-            account_data = response.value.data
-            mint_revoked = self._check_authority_revoked(account_data, 0)
-            freeze_revoked = self._check_authority_revoked(account_data, 36)
-            
-            safety_score = 50
-            red_flags, green_flags = [], []
-            
-            if mint_revoked:
-                green_flags.append("✅ Mint authority revoked")
-                safety_score += 25
-            else:
-                red_flags.append("⚠️ Mint authority active")
-                safety_score -= 15
-            
-            if freeze_revoked:
-                green_flags.append("✅ Freeze authority revoked")
-                safety_score += 25
-            else:
-                red_flags.append("⚠️ Freeze authority active")
-                safety_score -= 15
-            
-            safety_score = max(0, min(100, safety_score))
-            await self.db.add_contract_scan(address, mint_revoked, freeze_revoked, safety_score, red_flags)
-            
-            return {"safety_score": safety_score, "mint_revoked": mint_revoked,
-                   "freeze_revoked": freeze_revoked, "red_flags": red_flags,
-                   "green_flags": green_flags, "explanation": "Contract scanned"}
-        except Exception as e:
-            logger.error(f"Contract scan error: {e}")
-            return {"safety_score": 50, "mint_revoked": False, "freeze_revoked": False,
-                   "red_flags": ["Scan failed"], "green_flags": [], "explanation": ""}
-    
-    def _check_authority_revoked(self, data: bytes, offset: int) -> bool:
-        try:
-            return len(data) > offset and data[offset] == 0
-        except:
-            return False
-    
-    async def close(self):
-        await self.client.close()
-
-class NarrativeTracker:
-    NARRATIVES = {
-        "cat": ["cat", "kitty", "meow", "feline"], "dog": ["dog", "doge", "shiba", "woof"],
-        "ai": ["ai", "gpt", "bot", "neural"], "frog": ["frog", "pepe", "kek"],
-        "political": ["trump", "biden", "maga"], "food": ["burger", "pizza", "taco"],
-        "meme": ["chad", "wojak", "based"], "anime": ["anime", "waifu", "chan"],
-        "tech": ["elon", "rocket", "mars"], "moon": ["moon", "rocket", "100x"]
-    }
-    
-    def __init__(self, db: TokenDatabase):
-        self.db = db
-        self.narrative_cache = {}
-        self.last_stats_update = None
-    
-    async def detect_narrative(self, token: TokenData) -> List[str]:
-        text = f"{token.name} {token.symbol} {token.description}".lower()
-        detected = []
-        for narrative, keywords in self.NARRATIVES.items():
-            if any(kw in text for kw in keywords):
-                detected.append(narrative)
-        return detected
-    
-    async def calculate_narrative_boost(self, token: TokenData) -> tuple[float, List[str]]:
-        narratives = await self.detect_narrative(token)
-        if not narratives:
-            return 0, []
-        
-        hot_narratives = await self.db.get_narrative_stats(hours=NARRATIVE_WINDOW_HOURS)
-        boost, reasons = 0, []
-        
-        for narrative in narratives:
-            if narrative in hot_narratives:
-                stats = hot_narratives[narrative]
-                if stats["count"] >= 5 and stats["avg_performance"] > 50:
-                    boost += NARRATIVE_BOOST_WEIGHT
-                    reasons.append(f"🔥 {narrative.upper()} meta HOT ({stats['count']} tokens)")
-        
-        return min(boost, NARRATIVE_BOOST_WEIGHT), reasons
-
-class DevWalletTracker:
-    def __init__(self, db: TokenDatabase):
-        self.db = db
-    
-    async def get_dev_trust_score(self, dev_wallet: str) -> float:
-        scan = await self.db.get_dev_scan(dev_wallet)
-        if scan:
-            return scan["trust_score"]
-        return 50.0  # Default neutral
-    
-    async def update_dev_scan(self, dev_wallet: str, success: bool):
-        scan = await self.db.get_dev_scan(dev_wallet)
-        total = scan["total_launches"] + 1 if scan else 1
-        successful = scan["successful_launches"] + 1 if scan and success else (scan["successful_launches"] if scan else 0)
-        rugs = scan["rugs"] + 1 if scan and not success else (scan["rugs"] if scan else 0)
-        
-        trust_score = 50
-        if total >= DEV_MIN_SUCCESSFUL_LAUNCHES:
-            success_rate = successful / total
-            trust_score = max(20, min(95, success_rate * 100))
-        
-        await self.db.add_dev_scan(dev_wallet, total, successful, rugs, trust_score)
-
-class OutcomeTracker:
-    def __init__(self, db: TokenDatabase):
-        self.db = db
-    
-    async def record_outcome(self, address: str, peak_price: float, peak_time: datetime,
-                            final_outcome: str, gain_percent: float):
-        await self.db.add_outcome_data(address, peak_price, peak_time, final_outcome, gain_percent)
-
 class ConvictionFilter:
     @staticmethod
     async def safety_check(token: TokenData) -> tuple[bool, str]:
@@ -826,30 +594,103 @@ class ConvictionFilter:
             total_txns = token.txns_24h_buys + token.txns_24h_sells
             if buy_sell_ratio > 2 and total_txns > 100:
                 activity_score += 10
-                reasons.append(f"🔥 Heavy buying pressure ({token.txns_24h_buys}B/{token.txns_24h_sells}S)")
+                reasons.append(f"🔥 Heavy buying pressure")
             elif buy_sell_ratio > 1.5 and total_txns > 50:
                 activity_score += 7
-                reasons.append(f"✓ More buyers than sellers ({token.txns_24h_buys}B/{token.txns_24h_sells}S)")
+                reasons.append(f"✓ More buyers than sellers")
             elif total_txns > 100:
                 activity_score += 5
-                reasons.append(f"✓ High activity ({total_txns} txns)")
+                reasons.append(f"✓ High activity")
         score += activity_score
         
         score = min(score, 100)
         return score, reasons
 
+class TelegramPublisher:
+    def __init__(self, bot_token: str, channel_id: str):
+        self.bot = Bot(token=bot_token)
+        self.channel_id = channel_id
+        self.last_post_time = 0
+    
+    async def publish_signal(self, token: TokenData):
+        time_since_last = time.time() - self.last_post_time
+        if time_since_last < COOLDOWN_SEC:
+            wait_time = COOLDOWN_SEC - time_since_last
+            logger.info(f"Cooldown active, waiting {wait_time:.0f}s...")
+            await asyncio.sleep(wait_time)
+        message = self._format_message(token)
+        try:
+            sent_message = await self.bot.send_message(
+                chat_id=self.channel_id,
+                text=message,
+                parse_mode=ParseMode.HTML,
+                disable_web_page_preview=False
+            )
+            self.last_post_time = time.time()
+            logger.info(f"✓ Posted: {token.symbol} (score: {token.conviction_score:.0f})")
+            return sent_message.message_id
+        except Exception as e:
+            logger.error(f"Failed to post {token.symbol}: {e}")
+            return None
+    
+    def _format_message(self, token: TokenData) -> str:
+        conviction_emoji = "🔥🔥🔥" if token.conviction_score >= 80 else "🔥🔥" if token.conviction_score >= 65 else "🔥"
+        socials = []
+        if token.twitter:
+            socials.append(f"<a href='{token.twitter}'>Twitter</a>")
+        if token.telegram:
+            socials.append(f"<a href='{token.telegram}'>Telegram</a>")
+        if token.website:
+            socials.append(f"<a href='{token.website}'>Website</a>")
+        social_links = " | ".join(socials) if socials else "N/A"
+        dexscreener = f"https://dexscreener.com/solana/{token.pair_address or token.address}"
+        birdeye = f"https://birdeye.so/token/{token.address}?chain=solana"
+        reasons_text = "\n".join([f"  • {r}" for r in token.conviction_reasons[:6]])
+        age_text = ""
+        if token.launch_time:
+            age_hours = (datetime.now() - token.launch_time).total_seconds() / 3600
+            if age_hours < 1:
+                age_text = f"⚡ <{int(age_hours * 60)}m old (EARLY)"
+            else:
+                age_text = f"🕐 ~{int(age_hours)}h old"
+        return f"""
+{conviction_emoji} <b>HIGH CONVICTION SIGNAL</b> {conviction_emoji}
+
+<b>{token.name}</b> (${token.symbol})
+
+<b>CA:</b>
+<code>{token.address}</code>
+
+<b>Conviction Score:</b> {token.conviction_score:.0f}/100
+
+<b>Why This Could Smash:</b>
+{reasons_text}
+
+<b>Socials:</b> {social_links}
+
+<b>Charts:</b> <a href='{dexscreener}'>DexScreener</a> | <a href='{birdeye}'>Birdeye</a>
+
+<b>DEX:</b> {token.dex.upper()}
+<b>Liquidity:</b> ${token.liquidity_usd:,.0f}
+<b>24h Vol:</b> ${token.volume_24h:,.0f}
+<b>24h Change:</b> {token.price_change_24h:+.1f}%
+{age_text}
+
+⚠️ <b>DYOR:</b> Not financial advice. High risk = high reward.
+""".strip()
+
+# (Add your existing DexScreenerMonitor, TokenFollowUpMonitor, PerformanceTracker, MLLearningEngine, AIAnalysisEngine, ContractRiskScanner, NarrativeTracker, DevWalletTracker, OutcomeTracker classes here if you have them from earlier versions)
+
 class SentinelSignals:
     def __init__(self):
         self.db = TokenDatabase(DB_PATH)
-        self.filter_engine = ConvictionFilter()  # This is the missing class causing your error
+        self.filter_engine = ConvictionFilter()
         self.publisher = TelegramPublisher(TELEGRAM_TOKEN, CHANNEL_ID)
         self.monitor = DexScreenerMonitor()
         
-        # Follow-up & Performance (from previous)
         self.followup_monitor = None
         self.performance_tracker = None
         
-        # New advanced engines (from integration guide)
         self.ml_engine = MLLearningEngine(self.db) if ENABLE_ML_LEARNING else None
         self.ai_engine = AIAnalysisEngine(ANTHROPIC_API_KEY, self.db) if (ENABLE_AI_ANALYSIS and ANTHROPIC_API_KEY) else None
         self.contract_scanner = ContractRiskScanner(SOLANA_RPC_URL, self.db) if ENABLE_CONTRACT_SCANNER else None
@@ -858,10 +699,10 @@ class SentinelSignals:
         self.outcome_tracker = OutcomeTracker(self.db)
         
         self.running = False
-        
+    
     async def start(self):
         logger.info("=" * 60)
-        logger.info("SENTINEL SIGNALS - Advanced Edition")
+        logger.info("SENTINEL SIGNALS - Full Advanced Edition")
         logger.info("=" * 60)
         
         await self.db.connect()
@@ -1016,7 +857,7 @@ async def healthcheck_server():
     async def stats(request):
         return web.json_response({
             "status": "running",
-            "service": "sentinel-signals-advanced",
+            "service": "sentinel-signals-full",
             "timestamp": datetime.now().isoformat()
         })
     app = web.Application()
