@@ -740,6 +740,104 @@ class OutcomeTracker:
                             final_outcome: str, gain_percent: float):
         await self.db.add_outcome_data(address, peak_price, peak_time, final_outcome, gain_percent)
 
+class ConvictionFilter:
+    @staticmethod
+    async def safety_check(token: TokenData) -> tuple[bool, str]:
+        if not token.twitter and not token.telegram and not token.website:
+            return False, "No social links (likely scam)"
+        if token.liquidity_usd < MIN_LIQUIDITY:
+            return False, f"Low liquidity (${token.liquidity_usd:.0f})"
+        if token.launch_time:
+            age_minutes = (datetime.now() - token.launch_time).total_seconds() / 60
+            if age_minutes < MIN_AGE_MINUTES:
+                return False, f"Too new ({age_minutes:.0f}m old - possible rug)"
+            age_hours = age_minutes / 60
+            if age_hours > MAX_AGE_HOURS:
+                return False, f"Too old ({age_hours:.0f}h - not early)"
+        return True, "Passed safety checks"
+    
+    @staticmethod
+    async def calculate_conviction(token: TokenData) -> tuple[float, List[str]]:
+        score = 0.0
+        reasons = []
+        
+        social_score = 0
+        if token.twitter:
+            social_score += 10
+            reasons.append("✓ Twitter verified")
+        if token.telegram:
+            social_score += 10
+            reasons.append("✓ Telegram community")
+        if token.website:
+            social_score += 5
+            reasons.append("✓ Website")
+        score += social_score
+        
+        liq_score = 0
+        if token.liquidity_usd >= MIN_LIQUIDITY * 5:
+            liq_score += 25
+            reasons.append(f"💰 Massive liquidity (${token.liquidity_usd:,.0f})")
+        elif token.liquidity_usd >= MIN_LIQUIDITY * 3:
+            liq_score += 20
+            reasons.append(f"💰 Strong liquidity (${token.liquidity_usd:,.0f})")
+        elif token.liquidity_usd >= MIN_LIQUIDITY * 1.5:
+            liq_score += 15
+            reasons.append(f"✓ Good liquidity (${token.liquidity_usd:,.0f})")
+        elif token.liquidity_usd >= MIN_LIQUIDITY:
+            liq_score += 10
+            reasons.append(f"✓ Adequate liquidity (${token.liquidity_usd:,.0f})")
+        score += liq_score
+        
+        volume_score = 0
+        if token.volume_24h > 0 and token.liquidity_usd > 0:
+            vol_liq_ratio = token.volume_24h / token.liquidity_usd
+            if vol_liq_ratio > 5:
+                volume_score += 25
+                reasons.append(f"🚀 EXPLOSIVE volume (${token.volume_24h:,.0f})")
+            elif vol_liq_ratio > 3:
+                volume_score += 20
+                reasons.append(f"🔥 Very high volume (${token.volume_24h:,.0f})")
+            elif vol_liq_ratio > 1.5:
+                volume_score += 15
+                reasons.append(f"✓ Strong volume (${token.volume_24h:,.0f})")
+            elif vol_liq_ratio > 0.5:
+                volume_score += 10
+                reasons.append(f"✓ Healthy volume")
+        score += volume_score
+        
+        price_score = 0
+        if token.price_change_24h > 100:
+            price_score += 15
+            reasons.append(f"📈 +{token.price_change_24h:.0f}% (24h) - MOONING")
+        elif token.price_change_24h > 50:
+            price_score += 12
+            reasons.append(f"📈 +{token.price_change_24h:.0f}% (24h)")
+        elif token.price_change_24h > 20:
+            price_score += 8
+            reasons.append(f"📈 +{token.price_change_24h:.0f}% (24h)")
+        elif token.price_change_24h > 0:
+            price_score += 5
+            reasons.append(f"✓ Positive momentum")
+        score += price_score
+        
+        activity_score = 0
+        if token.txns_24h_buys > 0 and token.txns_24h_sells > 0:
+            buy_sell_ratio = token.txns_24h_buys / max(token.txns_24h_sells, 1)
+            total_txns = token.txns_24h_buys + token.txns_24h_sells
+            if buy_sell_ratio > 2 and total_txns > 100:
+                activity_score += 10
+                reasons.append(f"🔥 Heavy buying pressure ({token.txns_24h_buys}B/{token.txns_24h_sells}S)")
+            elif buy_sell_ratio > 1.5 and total_txns > 50:
+                activity_score += 7
+                reasons.append(f"✓ More buyers than sellers ({token.txns_24h_buys}B/{token.txns_24h_sells}S)")
+            elif total_txns > 100:
+                activity_score += 5
+                reasons.append(f"✓ High activity ({total_txns} txns)")
+        score += activity_score
+        
+        score = min(score, 100)
+        return score, reasons
+
 class SentinelSignals:
     def __init__(self):
         self.db = TokenDatabase(DB_PATH)
