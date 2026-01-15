@@ -659,7 +659,57 @@ class OutcomeTracker:
                 (address, posted_at, initial_price * max_multiple, outcome, gain_pct, datetime.now()))
             await self.db.db.commit()
             logger.info(f"📊 Outcome: {address[:8]} = {outcome} ({gain_pct:+.0f}%)")    
-            
+
+class WeeklyPerformanceReporter:
+    #Auto-posts weekly performance reports to Telegram every Sunday
+    def __init__(self, db: TokenDatabase, publisher: 'TelegramPublisher'):
+        self.db = db
+        self.publisher = publisher
+        self.running = False
+    
+    async def start(self):
+        self.running = True
+        logger.info("📊 Weekly reporter started")
+        while self.running:
+            try:
+                now = datetime.now()
+                if now.weekday() == 6 and now.hour == 0:
+                    await self.post_weekly_report()
+                    await asyncio.sleep(3600)
+                else:
+                    await asyncio.sleep(3600)
+            except Exception as e:
+                logger.error(f"Weekly reporter: {e}")
+                await asyncio.sleep(3600)
+    
+    async def post_weekly_report(self):
+        logger.info("📊 Generating weekly report...")
+        stats = await self.db.get_win_rate_stats(168)
+        day = await self.db.get_win_rate_stats(24)
+        conviction = await self.db.get_conviction_accuracy()
+        if stats["total"] == 0: return
+        emoji = "🔥🔥🔥" if stats["win_rate"] >= 70 else "🔥🔥" if stats["win_rate"] >= 50 else "🔥"
+        msg = f"""{emoji} <b>WEEKLY PERFORMANCE REPORT</b> {emoji}
+
+<b>📊 7-Day Stats:</b>
+Total: {stats["total"]} | Wins: {stats["wins"]} | Losses: {stats["losses"]}
+Win Rate: <b>{stats["win_rate"]:.1f}%</b>
+Avg Gain: <b>{stats["avg_gain"]:+.1f}%</b>
+
+<b>🏆 Best:</b> ${stats["best"]["symbol"]} (+{stats["best"]["gain"]:.0f}%)
+<b>📉 Worst:</b> ${stats["worst"]["symbol"]} ({stats["worst"]["gain"]:+.0f}%)
+
+<b>⚡ Last 24h:</b> {day["total"]} signals, {day["win_rate"]:.0f}% win rate
+
+<b>🎯 Conviction Accuracy:</b>"""
+        for r, d in conviction.items():
+            if d["count"] > 0:
+                avg = (d.get("avg_multiple", 1) - 1) * 100
+                msg += f"\n{r}: {d['count']} signals, avg {avg:+.0f}%"
+        msg += "\n\n📈 More signals coming!"
+        await self.publisher.publish_weekly_report(msg)
+        logger.info("✓ Weekly report posted")
+        
     async def stop(self):
         self.running = False
 
