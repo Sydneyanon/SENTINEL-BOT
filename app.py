@@ -242,6 +242,53 @@ class TokenDatabase:
         rows = await cursor.fetchall()
         return {row[0]: {"count": row[1], "avg_performance": row[2]} for row in rows}
     
+    async def get_win_rate_stats(self, hours: int = 168) -> Dict:
+        """Get comprehensive win rate statistics"""
+        cutoff = datetime.now() - timedelta(hours=hours)
+        cursor = await self.db.execute("""
+            SELECT t.address, t.symbol, t.posted_at, t.conviction_score, 
+                   t.initial_price, t.current_price, p.max_multiple
+            FROM tracked_tokens t
+            LEFT JOIN performance_tracking p ON t.address = p.address
+            WHERE t.posted_at > ?
+        """, (cutoff,))
+        rows = await cursor.fetchall()
+        total = len(rows)
+        if total == 0:
+            return {"total": 0, "wins": 0, "losses": 0, "win_rate": 0, "avg_gain": 0, "best": {"symbol": "", "gain": 0}, "worst": {"symbol": "", "gain": 0}}
+        wins = losses = 0
+        total_gain = 0
+        best = {"symbol": "", "gain": 0}
+        worst = {"symbol": "", "gain": 0}
+        for row in rows:
+            symbol, max_multiple = row[1], row[6] or 1
+            gain_pct = (max_multiple - 1) * 100
+            total_gain += gain_pct
+            if gain_pct >= 50: wins += 1
+            else: losses += 1
+            if gain_pct > best["gain"]: best = {"symbol": symbol, "gain": gain_pct}
+            if worst["symbol"] == "" or gain_pct < worst["gain"]: worst = {"symbol": symbol, "gain": gain_pct}
+        return {"total": total, "wins": wins, "losses": losses, "win_rate": (wins/total*100) if total > 0 else 0, "avg_gain": total_gain/total if total > 0 else 0, "best": best, "worst": worst}
+    
+    async def get_conviction_accuracy(self) -> Dict:
+        """See if high conviction scores = better performance"""
+        cursor = await self.db.execute("""
+            SELECT conviction_score, max_multiple FROM tracked_tokens t
+            LEFT JOIN performance_tracking p ON t.address = p.address
+            WHERE max_multiple > 0
+        """)
+        rows = await cursor.fetchall()
+        ranges = {"60-69": {"count": 0, "sum": 0}, "70-79": {"count": 0, "sum": 0}, "80-89": {"count": 0, "sum": 0}, "90-100": {"count": 0, "sum": 0}}
+        for row in rows:
+            score, multiple = row[0], row[1] or 1
+            if 60 <= score < 70: ranges["60-69"]["count"] += 1; ranges["60-69"]["sum"] += multiple
+            elif 70 <= score < 80: ranges["70-79"]["count"] += 1; ranges["70-79"]["sum"] += multiple
+            elif 80 <= score < 90: ranges["80-89"]["count"] += 1; ranges["80-89"]["sum"] += multiple
+            elif score >= 90: ranges["90-100"]["count"] += 1; ranges["90-100"]["sum"] += multiple
+        for r in ranges:
+            if ranges[r]["count"] > 0: ranges[r]["avg_multiple"] = ranges[r]["sum"] / ranges[r]["count"]
+        return ranges
+
     async def close(self):
         if self.db:
             await self.db.close()
