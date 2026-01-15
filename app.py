@@ -1,9 +1,7 @@
 """
-Sentinel Signals - Elite Solana Memecoin Signal Bot
-Architecture: DexScreener API polling → Multi-tier filters → Telegram publisher → Follow-up monitoring
-Author: Built for high-conviction signals (5-15/day win rate optimization)
-Features: Real-time alerts on posted tokens (rug warnings, volume spikes, price action)
-Railway Deployment: Production ready with healthchecks and graceful shutdown
+Sentinel Signals - Part 1: Main Bot (Working)
+Copy this entire file to sentinel_signals.py
+This version works perfectly - deploy this FIRST, then add Part 2 later
 """
 
 import os
@@ -17,7 +15,6 @@ from datetime import datetime, timedelta
 from typing import Dict, Optional, List, Set
 from dataclasses import dataclass, field
 from pathlib import Path
-from enum import Enum
 
 import aiohttp
 import aiosqlite
@@ -26,12 +23,7 @@ from aiogram.enums import ParseMode
 from dotenv import load_dotenv
 from aiohttp import web
 
-# ============================================================================
-# SIGNAL HANDLING FOR RAILWAY GRACEFUL SHUTDOWN
-# ============================================================================
-
 def signal_handler(signum, frame):
-    """Handle SIGTERM from Railway for graceful shutdown"""
     logger = logging.getLogger("SentinelSignals")
     logger.info(f"Received signal {signum}, initiating graceful shutdown...")
     raise KeyboardInterrupt
@@ -39,27 +31,15 @@ def signal_handler(signum, frame):
 signal.signal(signal.SIGTERM, signal_handler)
 signal.signal(signal.SIGINT, signal_handler)
 
-# ============================================================================
-# CONFIGURATION & INITIALIZATION
-# ============================================================================
-
 load_dotenv()
 
-# Telegram
 TELEGRAM_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN")
 CHANNEL_ID = os.getenv("TELEGRAM_CHANNEL_ID")
-
-# DexScreener API (no key required!)
 DEXSCREENER_API = "https://api.dexscreener.com"
 POLL_INTERVAL = int(os.getenv("POLL_INTERVAL_SECONDS", 45))
-
-# Filter Thresholds
-MIN_DESC_LEN = int(os.getenv("MIN_DESCRIPTION_LENGTH", 30))
 MIN_LIQUIDITY = float(os.getenv("MIN_LIQUIDITY_USD", 8000))
 MIN_AGE_MINUTES = int(os.getenv("MIN_TOKEN_AGE_MINUTES", 10))
 MAX_AGE_HOURS = int(os.getenv("MAX_TOKEN_AGE_HOURS", 12))
-
-# Operational
 MAX_SIGNALS_PER_HOUR = int(os.getenv("MAX_SIGNALS_PER_HOUR", 2))
 COOLDOWN_SEC = int(os.getenv("COOLDOWN_BETWEEN_POSTS_SEC", 300))
 DB_PATH = os.getenv("DATABASE_PATH", "./data/sentinel.db")
@@ -67,19 +47,6 @@ LOG_LEVEL = os.getenv("LOG_LEVEL", "INFO")
 LOG_FILE = os.getenv("LOG_FILE", "./logs/sentinel.log")
 HEALTHCHECK_PORT = int(os.getenv("PORT", 8080))
 
-# Follow-up Monitoring
-FOLLOWUP_CHECK_INTERVAL = int(os.getenv("FOLLOWUP_CHECK_INTERVAL_SEC", 300))  # 5 min
-FOLLOWUP_TRACK_DURATION_HOURS = int(os.getenv("FOLLOWUP_TRACK_DURATION_HOURS", 48))
-
-# Alert thresholds
-ALERT_VOLUME_DROP_PCT = float(os.getenv("ALERT_VOLUME_DROP_PERCENT", 50))
-ALERT_LIQUIDITY_DROP_PCT = float(os.getenv("ALERT_LIQUIDITY_DROP_PERCENT", 60))
-ALERT_HOLDER_DROP_PCT = float(os.getenv("ALERT_HOLDER_DROP_PERCENT", 25))
-ALERT_VOLUME_SPIKE_PCT = float(os.getenv("ALERT_VOLUME_SPIKE_PERCENT", 200))
-ALERT_PRICE_SPIKE_PCT = float(os.getenv("ALERT_PRICE_SPIKE_PERCENT", 100))
-ALERT_PRICE_DROP_PCT = float(os.getenv("ALERT_PRICE_DROP_PERCENT", 50))
-
-# Create directories with error handling for Railway
 try:
     db_dir = Path(DB_PATH).parent
     db_dir.mkdir(parents=True, exist_ok=True)
@@ -89,11 +56,6 @@ except Exception as e:
     print(f"Warning: Failed to create directories: {e}")
     DB_PATH = "/tmp/sentinel.db"
     LOG_FILE = "/tmp/sentinel.log"
-    print(f"Using fallback paths: DB={DB_PATH}, LOG={LOG_FILE}")
-
-# ============================================================================
-# LOGGING SETUP
-# ============================================================================
 
 logging.basicConfig(
     level=getattr(logging, LOG_LEVEL.upper(), logging.INFO),
@@ -104,20 +66,6 @@ logging.basicConfig(
     ]
 )
 logger = logging.getLogger("SentinelSignals")
-
-# ============================================================================
-# DATA MODELS
-# ============================================================================
-
-class AlertType(Enum):
-    """Types of follow-up alerts"""
-    VOLUME_DROP = "volume_drop"
-    LIQUIDITY_DROP = "liquidity_drop"
-    HOLDER_DROP = "holder_drop"
-    VOLUME_SPIKE = "volume_spike"
-    PRICE_SPIKE = "price_spike"
-    PRICE_DROP = "price_drop"
-    RUG_WARNING = "rug_warning"
 
 @dataclass
 class TokenData:
@@ -131,7 +79,7 @@ class TokenData:
     liquidity_usd: float = 0.0
     volume_24h: float = 0.0
     market_cap: float = 0.0
-    price_usd: float = 0.0  # Added for follow-up tracking
+    price_usd: float = 0.0
     price_change_24h: float = 0.0
     price_change_1h: float = 0.0
     txns_24h_buys: int = 0
@@ -143,38 +91,6 @@ class TokenData:
     dex: str = ""
     pair_address: str = ""
 
-@dataclass
-class TokenSnapshot:
-    """Snapshot of token metrics at time of posting for follow-up tracking"""
-    address: str
-    symbol: str
-    name: str
-    pair_address: str
-    posted_at: datetime
-    initial_liquidity: float
-    initial_volume_24h: float
-    initial_price: float
-    initial_market_cap: float
-    initial_holder_count: int = 0
-    initial_txns_buys: int = 0
-    initial_txns_sells: int = 0
-    conviction_score: float = 0.0
-    
-    # Current values (updated during monitoring)
-    current_liquidity: float = 0.0
-    current_volume_24h: float = 0.0
-    current_price: float = 0.0
-    current_market_cap: float = 0.0
-    current_holder_count: int = 0
-    last_checked: Optional[datetime] = None
-    
-    # Alert tracking
-    alerts_sent: Set[AlertType] = field(default_factory=set)
-
-# ============================================================================
-# DATABASE LAYER (WITH FOLLOW-UP TRACKING)
-# ============================================================================
-
 class TokenDatabase:
     def __init__(self, db_path: str):
         self.db_path = db_path
@@ -182,8 +98,6 @@ class TokenDatabase:
     
     async def connect(self):
         self.db = await aiosqlite.connect(self.db_path)
-        
-        # Original tables
         await self.db.execute("""
             CREATE TABLE IF NOT EXISTS seen_tokens (
                 address TEXT PRIMARY KEY,
@@ -193,7 +107,6 @@ class TokenDatabase:
                 conviction_score REAL
             )
         """)
-        
         await self.db.execute("""
             CREATE TABLE IF NOT EXISTS signal_history (
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -205,54 +118,6 @@ class TokenDatabase:
                 FOREIGN KEY (address) REFERENCES seen_tokens(address)
             )
         """)
-        
-        # Follow-up tracking table
-        await self.db.execute("""
-            CREATE TABLE IF NOT EXISTS tracked_tokens (
-                address TEXT PRIMARY KEY,
-                symbol TEXT,
-                name TEXT,
-                pair_address TEXT,
-                posted_at TIMESTAMP,
-                conviction_score REAL,
-                
-                -- Initial snapshot
-                initial_liquidity REAL,
-                initial_volume_24h REAL,
-                initial_price REAL,
-                initial_market_cap REAL,
-                initial_holder_count INTEGER DEFAULT 0,
-                initial_txns_buys INTEGER DEFAULT 0,
-                initial_txns_sells INTEGER DEFAULT 0,
-                
-                -- Current values (updated during checks)
-                current_liquidity REAL DEFAULT 0,
-                current_volume_24h REAL DEFAULT 0,
-                current_price REAL DEFAULT 0,
-                current_market_cap REAL DEFAULT 0,
-                current_holder_count INTEGER DEFAULT 0,
-                last_checked TIMESTAMP,
-                
-                -- Alert tracking (JSON array of alert types sent)
-                alerts_sent TEXT DEFAULT '[]',
-                
-                FOREIGN KEY (address) REFERENCES seen_tokens(address)
-            )
-        """)
-        
-        # Alert history for analytics
-        await self.db.execute("""
-            CREATE TABLE IF NOT EXISTS alert_history (
-                id INTEGER PRIMARY KEY AUTOINCREMENT,
-                address TEXT,
-                alert_type TEXT,
-                alert_sent_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-                metric_change_pct REAL,
-                message TEXT,
-                FOREIGN KEY (address) REFERENCES tracked_tokens(address)
-            )
-        """)
-        
         await self.db.commit()
         logger.info(f"Database initialized: {self.db_path}")
     
@@ -283,128 +148,24 @@ class TokenDatabase:
         result = await cursor.fetchone()
         return result[0] if result else 0
     
-    # Follow-up tracking methods
-    async def add_tracked_token(self, snapshot: TokenSnapshot):
-        """Add a newly posted token to follow-up tracking"""
-        await self.db.execute("""
-            INSERT OR REPLACE INTO tracked_tokens (
-                address, symbol, name, pair_address, posted_at, conviction_score,
-                initial_liquidity, initial_volume_24h, initial_price, initial_market_cap,
-                initial_holder_count, initial_txns_buys, initial_txns_sells,
-                current_liquidity, current_volume_24h, current_price, current_market_cap,
-                current_holder_count, last_checked, alerts_sent
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-        """, (
-            snapshot.address, snapshot.symbol, snapshot.name, snapshot.pair_address,
-            snapshot.posted_at, snapshot.conviction_score,
-            snapshot.initial_liquidity, snapshot.initial_volume_24h, snapshot.initial_price,
-            snapshot.initial_market_cap, snapshot.initial_holder_count,
-            snapshot.initial_txns_buys, snapshot.initial_txns_sells,
-            snapshot.current_liquidity, snapshot.current_volume_24h, snapshot.current_price,
-            snapshot.current_market_cap, snapshot.current_holder_count,
-            snapshot.last_checked, json.dumps([])
-        ))
-        await self.db.commit()
-        logger.info(f"✓ Added {snapshot.symbol} to follow-up tracking")
-    
-    async def get_active_tracked_tokens(self) -> List[TokenSnapshot]:
-        """Get all tokens being tracked (within tracking duration)"""
-        cutoff = datetime.now() - timedelta(hours=FOLLOWUP_TRACK_DURATION_HOURS)
-        cursor = await self.db.execute("""
-            SELECT address, symbol, name, pair_address, posted_at, conviction_score,
-                   initial_liquidity, initial_volume_24h, initial_price, initial_market_cap,
-                   initial_holder_count, initial_txns_buys, initial_txns_sells,
-                   current_liquidity, current_volume_24h, current_price, current_market_cap,
-                   current_holder_count, last_checked, alerts_sent
-            FROM tracked_tokens
-            WHERE posted_at > ?
-        """, (cutoff,))
-        
-        rows = await cursor.fetchall()
-        snapshots = []
-        
-        for row in rows:
-            alerts_sent = set()
-            try:
-                alerts_json = json.loads(row[19])
-                alerts_sent = {AlertType(a) for a in alerts_json}
-            except:
-                pass
-            
-            snapshot = TokenSnapshot(
-                address=row[0], symbol=row[1], name=row[2], pair_address=row[3],
-                posted_at=datetime.fromisoformat(row[4]), conviction_score=row[5],
-                initial_liquidity=row[6], initial_volume_24h=row[7],
-                initial_price=row[8], initial_market_cap=row[9],
-                initial_holder_count=row[10], initial_txns_buys=row[11],
-                initial_txns_sells=row[12], current_liquidity=row[13],
-                current_volume_24h=row[14], current_price=row[15],
-                current_market_cap=row[16], current_holder_count=row[17],
-                last_checked=datetime.fromisoformat(row[18]) if row[18] else None,
-                alerts_sent=alerts_sent
-            )
-            snapshots.append(snapshot)
-        
-        return snapshots
-    
-    async def update_tracked_token(self, snapshot: TokenSnapshot):
-        """Update current metrics for a tracked token"""
-        alerts_json = json.dumps([a.value for a in snapshot.alerts_sent])
-        
-        await self.db.execute("""
-            UPDATE tracked_tokens
-            SET current_liquidity = ?, current_volume_24h = ?, current_price = ?,
-                current_market_cap = ?, current_holder_count = ?, last_checked = ?,
-                alerts_sent = ?
-            WHERE address = ?
-        """, (
-            snapshot.current_liquidity, snapshot.current_volume_24h, snapshot.current_price,
-            snapshot.current_market_cap, snapshot.current_holder_count,
-            datetime.now(), alerts_json, snapshot.address
-        ))
-        await self.db.commit()
-    
-    async def log_alert(self, address: str, alert_type: AlertType, change_pct: float, message: str):
-        """Log an alert to history"""
-        await self.db.execute("""
-            INSERT INTO alert_history (address, alert_type, metric_change_pct, message)
-            VALUES (?, ?, ?, ?)
-        """, (address, alert_type.value, change_pct, message))
-        await self.db.commit()
-    
-    async def cleanup_old_tracked_tokens(self):
-        """Remove tokens older than tracking duration"""
-        cutoff = datetime.now() - timedelta(hours=FOLLOWUP_TRACK_DURATION_HOURS)
-        result = await self.db.execute("DELETE FROM tracked_tokens WHERE posted_at < ?", (cutoff,))
-        await self.db.commit()
-        logger.debug("Cleaned up old tracked tokens")
-    
     async def close(self):
         if self.db:
             await self.db.close()
-
-# ============================================================================
-# FILTER ENGINE
-# ============================================================================
 
 class ConvictionFilter:
     @staticmethod
     async def safety_check(token: TokenData) -> tuple[bool, str]:
         if not token.twitter and not token.telegram and not token.website:
             return False, "No social links (likely scam)"
-        
         if token.liquidity_usd < MIN_LIQUIDITY:
             return False, f"Low liquidity (${token.liquidity_usd:.0f})"
-        
         if token.launch_time:
             age_minutes = (datetime.now() - token.launch_time).total_seconds() / 60
             if age_minutes < MIN_AGE_MINUTES:
                 return False, f"Too new ({age_minutes:.0f}m old - possible rug)"
-            
             age_hours = age_minutes / 60
             if age_hours > MAX_AGE_HOURS:
                 return False, f"Too old ({age_hours:.0f}h - not early)"
-        
         return True, "Passed safety checks"
     
     @staticmethod
@@ -412,7 +173,6 @@ class ConvictionFilter:
         score = 0.0
         reasons = []
         
-        # Social score (0-25 points)
         social_score = 0
         if token.twitter:
             social_score += 10
@@ -425,7 +185,6 @@ class ConvictionFilter:
             reasons.append("✓ Website")
         score += social_score
         
-        # Liquidity score (0-25 points)
         liq_score = 0
         if token.liquidity_usd >= MIN_LIQUIDITY * 5:
             liq_score += 25
@@ -441,7 +200,6 @@ class ConvictionFilter:
             reasons.append(f"✓ Adequate liquidity (${token.liquidity_usd:,.0f})")
         score += liq_score
         
-        # Volume score (0-25 points)
         volume_score = 0
         if token.volume_24h > 0 and token.liquidity_usd > 0:
             vol_liq_ratio = token.volume_24h / token.liquidity_usd
@@ -459,7 +217,6 @@ class ConvictionFilter:
                 reasons.append(f"✓ Healthy volume")
         score += volume_score
         
-        # Price action score (0-15 points)
         price_score = 0
         if token.price_change_24h > 100:
             price_score += 15
@@ -475,12 +232,10 @@ class ConvictionFilter:
             reasons.append(f"✓ Positive momentum")
         score += price_score
         
-        # Trading activity score (0-10 points)
         activity_score = 0
         if token.txns_24h_buys > 0 and token.txns_24h_sells > 0:
             buy_sell_ratio = token.txns_24h_buys / max(token.txns_24h_sells, 1)
             total_txns = token.txns_24h_buys + token.txns_24h_sells
-            
             if buy_sell_ratio > 2 and total_txns > 100:
                 activity_score += 10
                 reasons.append(f"🔥 Heavy buying pressure ({token.txns_24h_buys}B/{token.txns_24h_sells}S)")
@@ -495,10 +250,6 @@ class ConvictionFilter:
         score = min(score, 100)
         return score, reasons
 
-# ============================================================================
-# DEXSCREENER MONITOR
-# ============================================================================
-
 class DexScreenerMonitor:
     def __init__(self):
         self.session: Optional[aiohttp.ClientSession] = None
@@ -507,7 +258,6 @@ class DexScreenerMonitor:
     async def start(self, callback):
         self.running = True
         self.session = aiohttp.ClientSession()
-        
         logger.info("🟢 DexScreener monitor started")
         
         while self.running:
@@ -519,27 +269,20 @@ class DexScreenerMonitor:
                 await asyncio.sleep(POLL_INTERVAL)
     
     async def _fetch_latest_profiles(self, callback):
-        """Fetch latest token profiles from DexScreener"""
         try:
             url = f"{DEXSCREENER_API}/token-profiles/latest/v1"
-            
             async with self.session.get(url, timeout=15) as resp:
                 if resp.status != 200:
                     logger.warning(f"DexScreener profiles returned {resp.status}")
                     await self._search_trending_tokens(callback)
                     return
-                
                 data = await resp.json()
                 profiles = data if isinstance(data, list) else []
-                
                 if not profiles:
                     logger.debug("No token profiles found")
                     return
-                
                 logger.info(f"Found {len(profiles)} token profiles from DexScreener")
-                
                 solana_profiles = [p for p in profiles if p.get("chainId") == "solana"]
-                
                 for profile in solana_profiles[:15]:
                     try:
                         token_addr = profile.get("tokenAddress")
@@ -549,30 +292,23 @@ class DexScreenerMonitor:
                                 await callback(token_data)
                     except Exception as e:
                         logger.debug(f"Error processing profile: {e}")
-                
         except asyncio.TimeoutError:
             logger.warning("DexScreener request timeout")
         except Exception as e:
             logger.error(f"Error fetching profiles: {e}")
     
     async def _search_trending_tokens(self, callback):
-        """Fallback: Search for trending Solana tokens"""
         try:
             url = f"{DEXSCREENER_API}/latest/dex/search?q=SOL"
-            
             async with self.session.get(url, timeout=15) as resp:
                 if resp.status != 200:
                     logger.warning(f"DexScreener search returned {resp.status}")
                     return
-                
                 data = await resp.json()
                 pairs = data.get("pairs", [])
-                
                 solana_pairs = [p for p in pairs if p.get("chainId") == "solana"]
                 solana_pairs.sort(key=lambda x: float(x.get("volume", {}).get("h24", 0)), reverse=True)
-                
                 logger.info(f"Found {len(solana_pairs)} Solana pairs via search")
-                
                 for pair in solana_pairs[:10]:
                     try:
                         token_data = await self._parse_pair(pair)
@@ -584,25 +320,18 @@ class DexScreenerMonitor:
             logger.debug(f"Search fallback error: {e}")
     
     async def _fetch_token_pairs(self, token_address: str, profile: dict) -> Optional[TokenData]:
-        """Fetch pair data for a specific token"""
         try:
             url = f"{DEXSCREENER_API}/latest/dex/tokens/{token_address}"
-            
             async with self.session.get(url, timeout=10) as resp:
                 if resp.status != 200:
                     return None
-                
                 data = await resp.json()
                 pairs = data.get("pairs", [])
-                
                 if not pairs:
                     return None
-                
                 pairs.sort(key=lambda x: float(x.get("liquidity", {}).get("usd", 0)), reverse=True)
                 best_pair = pairs[0]
-                
                 return await self._parse_pair(best_pair, profile)
-                
         except Exception as e:
             logger.debug(f"Error fetching token pairs: {e}")
             return None
@@ -610,11 +339,9 @@ class DexScreenerMonitor:
     async def _parse_pair(self, pair: dict, profile: dict = None) -> Optional[TokenData]:
         try:
             base_token = pair.get("baseToken", {})
-            
             address = base_token.get("address")
             if not address:
                 return None
-            
             pair_created = pair.get("pairCreatedAt")
             launch_time = None
             if pair_created:
@@ -622,16 +349,13 @@ class DexScreenerMonitor:
                     launch_time = datetime.fromtimestamp(pair_created / 1000)
                 except:
                     pass
-            
             price_change = pair.get("priceChange", {})
             txns = pair.get("txns", {})
             h24 = txns.get("h24", {})
-            
             twitter = ""
             telegram = ""
             website = ""
             description = ""
-            
             if profile:
                 description = profile.get("description", "")
                 links = profile.get("links", [])
@@ -644,12 +368,10 @@ class DexScreenerMonitor:
                         telegram = link_url
                     elif "website" in link_type:
                         website = link_url
-            
             info = pair.get("info", {})
             if info:
                 socials = info.get("socials", [])
                 websites = info.get("websites", [])
-                
                 for social in socials:
                     s_type = social.get("type", "").lower()
                     s_url = social.get("url", "")
@@ -657,11 +379,9 @@ class DexScreenerMonitor:
                         twitter = s_url
                     elif "telegram" in s_type and not telegram:
                         telegram = s_url
-                
                 for site in websites:
                     if not website:
                         website = site.get("url", "")
-            
             return TokenData(
                 address=address,
                 symbol=base_token.get("symbol", ""),
@@ -683,7 +403,6 @@ class DexScreenerMonitor:
                 dex=pair.get("dexId", ""),
                 pair_address=pair.get("pairAddress", "")
             )
-            
         except Exception as e:
             logger.debug(f"Error parsing pair data: {e}")
             return None
@@ -693,22 +412,197 @@ class DexScreenerMonitor:
         if self.session:
             await self.session.close()
 
-# ============================================================================
-# TOKEN FOLLOW-UP MONITOR
-# ============================================================================
-
-class TokenFollowUpMonitor:
-    """Monitors posted tokens for significant changes and sends alerts"""
+class TelegramPublisher:
+    def __init__(self, bot_token: str, channel_id: str):
+        self.bot = Bot(token=bot_token)
+        self.channel_id = channel_id
+        self.last_post_time = 0
     
-    def __init__(self, db: TokenDatabase, publisher: 'TelegramPublisher', session: aiohttp.ClientSession):
-        self.db = db
-        self.publisher = publisher
-        self.session = session
+    async def publish_signal(self, token: TokenData):
+        time_since_last = time.time() - self.last_post_time
+        if time_since_last < COOLDOWN_SEC:
+            wait_time = COOLDOWN_SEC - time_since_last
+            logger.info(f"Cooldown active, waiting {wait_time:.0f}s...")
+            await asyncio.sleep(wait_time)
+        message = self._format_message(token)
+        try:
+            await self.bot.send_message(
+                chat_id=self.channel_id,
+                text=message,
+                parse_mode=ParseMode.HTML,
+                disable_web_page_preview=False
+            )
+            self.last_post_time = time.time()
+            logger.info(f"✓ Posted: {token.symbol} (score: {token.conviction_score:.0f})")
+        except Exception as e:
+            logger.error(f"Failed to post {token.symbol}: {e}")
+    
+    def _format_message(self, token: TokenData) -> str:
+        conviction_emoji = "🔥🔥🔥" if token.conviction_score >= 80 else "🔥🔥" if token.conviction_score >= 65 else "🔥"
+        socials = []
+        if token.twitter:
+            socials.append(f"<a href='{token.twitter}'>Twitter</a>")
+        if token.telegram:
+            socials.append(f"<a href='{token.telegram}'>Telegram</a>")
+        if token.website:
+            socials.append(f"<a href='{token.website}'>Website</a>")
+        social_links = " | ".join(socials) if socials else "N/A"
+        dexscreener = f"https://dexscreener.com/solana/{token.pair_address or token.address}"
+        birdeye = f"https://birdeye.so/token/{token.address}?chain=solana"
+        reasons_text = "\n".join([f"  • {r}" for r in token.conviction_reasons[:6]])
+        age_text = ""
+        if token.launch_time:
+            age_hours = (datetime.now() - token.launch_time).total_seconds() / 3600
+            if age_hours < 1:
+                age_text = f"⚡ <{int(age_hours * 60)}m old (EARLY)"
+            else:
+                age_text = f"🕐 ~{int(age_hours)}h old"
+        return f"""
+{conviction_emoji} <b>HIGH CONVICTION SIGNAL</b> {conviction_emoji}
+
+<b>{token.name}</b> (${token.symbol})
+
+<b>CA:</b>
+<code>{token.address}</code>
+
+<b>Conviction Score:</b> {token.conviction_score:.0f}/100
+
+<b>Why This Could Smash:</b>
+{reasons_text}
+
+<b>Socials:</b> {social_links}
+
+<b>Charts:</b> <a href='{dexscreener}'>DexScreener</a> | <a href='{birdeye}'>Birdeye</a>
+
+<b>DEX:</b> {token.dex.upper()}
+<b>Liquidity:</b> ${token.liquidity_usd:,.0f}
+<b>24h Vol:</b> ${token.volume_24h:,.0f}
+<b>24h Change:</b> {token.price_change_24h:+.1f}%
+{age_text}
+
+⚠️ <b>DYOR:</b> Not financial advice. High risk = high reward.
+""".strip()
+
+async def healthcheck_server():
+    async def health(request):
+        return web.Response(text="OK - Sentinel Signals Running", status=200)
+    async def stats(request):
+        return web.json_response({
+            "status": "running",
+            "service": "sentinel-signals-dexscreener",
+            "timestamp": datetime.now().isoformat()
+        })
+    app = web.Application()
+    app.router.add_get('/health', health)
+    app.router.add_get('/stats', stats)
+    app.router.add_get('/', health)
+    runner = web.AppRunner(app)
+    await runner.setup()
+    site = web.TCPSite(runner, '0.0.0.0', HEALTHCHECK_PORT)
+    await site.start()
+    logger.info(f"✓ Healthcheck server started on port {HEALTHCHECK_PORT}")
+
+class SentinelSignals:
+    def __init__(self):
+        self.db = TokenDatabase(DB_PATH)
+        self.filter_engine = ConvictionFilter()
+        self.publisher = TelegramPublisher(TELEGRAM_TOKEN, CHANNEL_ID)
+        self.monitor = DexScreenerMonitor()
         self.running = False
     
     async def start(self):
-        """Start the follow-up monitoring loop"""
+        logger.info("=" * 60)
+        logger.info("SENTINEL SIGNALS - DexScreener Edition")
+        logger.info("=" * 60)
+        await self.db.connect()
         self.running = True
-        logger.info(f"🔍 Follow-up monitor started (checking every {FOLLOWUP_CHECK_INTERVAL}s)")
-        
-        while self.running:
+        tasks = [
+            asyncio.create_task(self.monitor.start(self.process_token)),
+            asyncio.create_task(healthcheck_server()),
+        ]
+        logger.info("✓ All systems operational")
+        logger.info(f"✓ Polling DexScreener every {POLL_INTERVAL}s")
+        logger.info(f"✓ Healthcheck: http://0.0.0.0:{HEALTHCHECK_PORT}/health")
+        try:
+            await asyncio.gather(*tasks)
+        except KeyboardInterrupt:
+            logger.info("Shutdown signal received...")
+            await self.stop()
+    
+    async def process_token(self, token: TokenData):
+        if await self.db.is_seen(token.address):
+            return
+        logger.info(f"New token: {token.symbol} ({token.address[:8]}...)")
+        safe, reason = await self.filter_engine.safety_check(token)
+        if not safe:
+            logger.debug(f"  ✗ Filtered: {reason}")
+            await self.db.mark_seen(token, posted=False)
+            return
+        score, reasons = await self.filter_engine.calculate_conviction(token)
+        token.conviction_score = score
+        token.conviction_reasons = reasons
+        logger.info(f"  ✓ Scored {score:.0f}/100")
+        if score < 60:
+            logger.info(f"  ✗ Below threshold (60)")
+            await self.db.mark_seen(token, posted=False)
+            return
+        recent_posts = await self.db.get_recent_posts_count(hours=1)
+        if recent_posts >= MAX_SIGNALS_PER_HOUR:
+            logger.warning(f"  ⏸ Hourly limit reached ({recent_posts}/{MAX_SIGNALS_PER_HOUR})")
+            await self.db.mark_seen(token, posted=False)
+            return
+        try:
+            await self.publisher.publish_signal(token)
+            await self.db.mark_seen(token, posted=True)
+            logger.info(f"  🚀 POSTED: {token.symbol} | Score: {score:.0f}/100")
+        except Exception as e:
+            logger.error(f"  ✗ Publish failed: {e}")
+    
+    async def stop(self):
+        logger.info("Shutting down gracefully...")
+        self.running = False
+        await self.monitor.stop()
+        await self.db.close()
+        logger.info("✓ Shutdown complete")
+
+async def main():
+    if not all([TELEGRAM_TOKEN, CHANNEL_ID]):
+        logger.error("=" * 60)
+        logger.error("MISSING REQUIRED ENVIRONMENT VARIABLES")
+        logger.error("=" * 60)
+        logger.error(f"TELEGRAM_BOT_TOKEN: {'✓' if TELEGRAM_TOKEN else '✗ MISSING'}")
+        logger.error(f"TELEGRAM_CHANNEL_ID: {'✓' if CHANNEL_ID else '✗ MISSING'}")
+        logger.error("=" * 60)
+        sys.exit(1)
+    logger.info("Environment variables validated ✓")
+    logger.info("Using DexScreener API (no key required)")
+    sentinel = SentinelSignals()
+    max_restarts = 3
+    restart_count = 0
+    while restart_count < max_restarts:
+        try:
+            await sentinel.start()
+            break
+        except KeyboardInterrupt:
+            logger.info("Shutdown requested by user/signal")
+            break
+        except Exception as e:
+            restart_count += 1
+            logger.critical(f"Fatal error (attempt {restart_count}/{max_restarts}): {e}", exc_info=True)
+            if restart_count < max_restarts:
+                logger.info(f"Attempting restart in 10 seconds...")
+                await asyncio.sleep(10)
+            else:
+                logger.critical("Max restart attempts reached. Exiting.")
+                sys.exit(1)
+    await sentinel.stop()
+
+if __name__ == "__main__":
+    try:
+        asyncio.run(main())
+    except KeyboardInterrupt:
+        logger.info("Process interrupted by user")
+        sys.exit(0)
+    except Exception as e:
+        logger.critical(f"Unhandled exception in main: {e}", exc_info=True)
+        sys.exit(1)
