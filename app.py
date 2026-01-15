@@ -741,7 +741,6 @@ class OutcomeTracker:
         await self.db.add_outcome_data(address, peak_price, peak_time, final_outcome, gain_percent)
 
 class SentinelSignals:
-    class SentinelSignals:
     def __init__(self):
         self.db = TokenDatabase(DB_PATH)
         self.filter_engine = ConvictionFilter()  # This is the missing class causing your error
