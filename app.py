@@ -348,7 +348,8 @@ class MLLearningEngine:
         self.db = db
         self.model = None
         self.scaler = None
-    
+        self.last_training = None   
+        
     async def initialize(self):
         try:
             with open(ML_MODEL_PATH, 'rb') as f: self.model = pickle.load(f)
@@ -365,6 +366,24 @@ class MLLearningEngine:
             return max(0, min(100, base_score + adj)), f"ML: {prob*100:.0f}% win prob"
         except: return base_score, "ML error"
 
+     async def train_model(self):
+        #Train ML model on historical outcomes
+        logger.info("🧠 Training ML model...")
+        data = await self.db.get_training_data(500)
+        if len(data) < 50:
+            logger.warning(f"Not enough data ({len(data)}/50)")
+            return False
+        X = np.array([[d['conviction_score'], d['liquidity'], d['volume'], len(d['symbol']), d['volume']/max(d['liquidity'],1)] for d in data])
+        y = np.array([d['success'] for d in data])
+        X_scaled = self.scaler.fit_transform(X)
+        self.model.fit(X_scaled, y)
+        Path(ML_MODEL_PATH).parent.mkdir(parents=True, exist_ok=True)
+        with open(ML_MODEL_PATH, 'wb') as f: pickle.dump(self.model, f)
+        with open(ML_SCALER_PATH, 'wb') as f: pickle.dump(self.scaler, f)
+        self.last_training = datetime.now()
+        accuracy = self.model.score(X_scaled, y)
+        logger.info(f"✓ ML trained on {len(data)} samples, accuracy: {accuracy*100:.1f}%")
+        return True
 class AIAnalysisEngine:
     def __init__(self, api_key: str, db: TokenDatabase):
         self.client = anthropic.Anthropic(api_key=api_key)
