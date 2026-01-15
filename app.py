@@ -620,8 +620,8 @@ class PerformanceTracker:
                 return {"price": float(pairs[0].get("priceUsd", 0))}
         except: return None
 
-    class OutcomeTracker:
-    """Tracks outcomes to feed ML training - Makes ML learn over time!"""
+class OutcomeTracker:
+    #Tracks outcomes to feed ML training - Makes ML learn over time!
     def __init__(self, db: TokenDatabase, ml_engine: Optional['MLLearningEngine']):
         self.db = db
         self.ml_engine = ml_engine
