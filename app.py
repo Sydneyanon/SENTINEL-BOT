@@ -1,7 +1,6 @@
 """
-Sentinel Signals - Part 1: Main Bot (Working)
-Copy this entire file to sentinel_signals.py
-This version works perfectly - deploy this FIRST, then add Part 2 later
+Sentinel Signals - DexScreener Edition with Follow-Up Monitoring
+Part 1 + Part 2 fully integrated
 """
 
 import os
@@ -15,6 +14,7 @@ from datetime import datetime, timedelta
 from typing import Dict, Optional, List, Set
 from dataclasses import dataclass, field
 from pathlib import Path
+from enum import Enum
 
 import aiohttp
 import aiosqlite
@@ -47,6 +47,17 @@ LOG_LEVEL = os.getenv("LOG_LEVEL", "INFO")
 LOG_FILE = os.getenv("LOG_FILE", "./logs/sentinel.log")
 HEALTHCHECK_PORT = int(os.getenv("PORT", 8080))
 
+# Follow-up Monitoring (added after HEALTHCHECK_PORT line)
+FOLLOWUP_CHECK_INTERVAL = int(os.getenv("FOLLOWUP_CHECK_INTERVAL_SEC", 300))  # 5 min
+FOLLOWUP_TRACK_DURATION_HOURS = int(os.getenv("FOLLOWUP_TRACK_DURATION_HOURS", 48))
+
+# Alert thresholds
+ALERT_VOLUME_DROP_PCT = float(os.getenv("ALERT_VOLUME_DROP_PERCENT", 50))
+ALERT_LIQUIDITY_DROP_PCT = float(os.getenv("ALERT_LIQUIDITY_DROP_PERCENT", 60))
+ALERT_VOLUME_SPIKE_PCT = float(os.getenv("ALERT_VOLUME_SPIKE_PERCENT", 200))
+ALERT_PRICE_SPIKE_PCT = float(os.getenv("ALERT_PRICE_SPIKE_PERCENT", 100))
+ALERT_PRICE_DROP_PCT = float(os.getenv("ALERT_PRICE_DROP_PERCENT", 50))
+
 try:
     db_dir = Path(DB_PATH).parent
     db_dir.mkdir(parents=True, exist_ok=True)
@@ -66,6 +77,14 @@ logging.basicConfig(
     ]
 )
 logger = logging.getLogger("SentinelSignals")
+
+class AlertType(Enum):
+    VOLUME_DROP = "volume_drop"
+    LIQUIDITY_DROP = "liquidity_drop"
+    VOLUME_SPIKE = "volume_spike"
+    PRICE_SPIKE = "price_spike"
+    PRICE_DROP = "price_drop"
+    RUG_WARNING = "rug_warning"
 
 @dataclass
 class TokenData:
@@ -91,6 +110,23 @@ class TokenData:
     dex: str = ""
     pair_address: str = ""
 
+@dataclass
+class TokenSnapshot:
+    address: str
+    symbol: str
+    name: str
+    pair_address: str
+    posted_at: datetime
+    initial_liquidity: float
+    initial_volume_24h: float
+    initial_price: float
+    conviction_score: float = 0.0
+    current_liquidity: float = 0.0
+    current_volume_24h: float = 0.0
+    current_price: float = 0.0
+    last_checked: Optional[datetime] = None
+    alerts_sent: Set[AlertType] = field(default_factory=set)
+
 class TokenDatabase:
     def __init__(self, db_path: str):
         self.db_path = db_path
@@ -98,6 +134,8 @@ class TokenDatabase:
     
     async def connect(self):
         self.db = await aiosqlite.connect(self.db_path)
+        
+        # Original tables
         await self.db.execute("""
             CREATE TABLE IF NOT EXISTS seen_tokens (
                 address TEXT PRIMARY KEY,
@@ -118,6 +156,39 @@ class TokenDatabase:
                 FOREIGN KEY (address) REFERENCES seen_tokens(address)
             )
         """)
+        
+        # NEW: Follow-up tracking tables
+        await self.db.execute("""
+            CREATE TABLE IF NOT EXISTS tracked_tokens (
+                address TEXT PRIMARY KEY,
+                symbol TEXT,
+                name TEXT,
+                pair_address TEXT,
+                posted_at TIMESTAMP,
+                conviction_score REAL,
+                initial_liquidity REAL,
+                initial_volume_24h REAL,
+                initial_price REAL,
+                current_liquidity REAL DEFAULT 0,
+                current_volume_24h REAL DEFAULT 0,
+                current_price REAL DEFAULT 0,
+                last_checked TIMESTAMP,
+                alerts_sent TEXT DEFAULT '[]',
+                FOREIGN KEY (address) REFERENCES seen_tokens(address)
+            )
+        """)
+        await self.db.execute("""
+            CREATE TABLE IF NOT EXISTS alert_history (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                address TEXT,
+                alert_type TEXT,
+                alert_sent_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                metric_change_pct REAL,
+                message TEXT,
+                FOREIGN KEY (address) REFERENCES tracked_tokens(address)
+            )
+        """)
+        
         await self.db.commit()
         logger.info(f"Database initialized: {self.db_path}")
     
@@ -132,14 +203,12 @@ class TokenDatabase:
             (address, symbol, posted, conviction_score)
             VALUES (?, ?, ?, ?)
         """, (token.address, token.symbol, posted, token.conviction_score))
-        
         if posted:
             await self.db.execute("""
                 INSERT INTO signal_history 
                 (address, symbol, conviction_score, initial_liquidity)
                 VALUES (?, ?, ?, ?)
             """, (token.address, token.symbol, token.conviction_score, token.liquidity_usd))
-        
         await self.db.commit()
     
     async def get_recent_posts_count(self, hours: int = 1) -> int:
@@ -147,6 +216,81 @@ class TokenDatabase:
         cursor = await self.db.execute("SELECT COUNT(*) FROM signal_history WHERE posted_at > ?", (cutoff,))
         result = await cursor.fetchone()
         return result[0] if result else 0
+    
+    # NEW: Follow-up tracking methods
+    async def add_tracked_token(self, snapshot: TokenSnapshot):
+        await self.db.execute("""
+            INSERT OR REPLACE INTO tracked_tokens (
+                address, symbol, name, pair_address, posted_at, conviction_score,
+                initial_liquidity, initial_volume_24h, initial_price,
+                current_liquidity, current_volume_24h, current_price,
+                last_checked, alerts_sent
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        """, (
+            snapshot.address, snapshot.symbol, snapshot.name, snapshot.pair_address,
+            snapshot.posted_at, snapshot.conviction_score,
+            snapshot.initial_liquidity, snapshot.initial_volume_24h, snapshot.initial_price,
+            snapshot.current_liquidity, snapshot.current_volume_24h, snapshot.current_price,
+            snapshot.last_checked, json.dumps([])
+        ))
+        await self.db.commit()
+        logger.info(f"✓ Added {snapshot.symbol} to follow-up tracking")
+    
+    async def get_active_tracked_tokens(self) -> List[TokenSnapshot]:
+        cutoff = datetime.now() - timedelta(hours=FOLLOWUP_TRACK_DURATION_HOURS)
+        cursor = await self.db.execute("""
+            SELECT address, symbol, name, pair_address, posted_at, conviction_score,
+                   initial_liquidity, initial_volume_24h, initial_price,
+                   current_liquidity, current_volume_24h, current_price,
+                   last_checked, alerts_sent
+            FROM tracked_tokens
+            WHERE posted_at > ?
+        """, (cutoff,))
+        rows = await cursor.fetchall()
+        snapshots = []
+        for row in rows:
+            alerts_sent = set()
+            try:
+                alerts_json = json.loads(row[13])
+                alerts_sent = {AlertType(a) for a in alerts_json}
+            except:
+                pass
+            snapshot = TokenSnapshot(
+                address=row[0], symbol=row[1], name=row[2], pair_address=row[3],
+                posted_at=datetime.fromisoformat(row[4]), conviction_score=row[5],
+                initial_liquidity=row[6], initial_volume_24h=row[7], initial_price=row[8],
+                current_liquidity=row[9], current_volume_24h=row[10], current_price=row[11],
+                last_checked=datetime.fromisoformat(row[12]) if row[12] else None,
+                alerts_sent=alerts_sent
+            )
+            snapshots.append(snapshot)
+        return snapshots
+    
+    async def update_tracked_token(self, snapshot: TokenSnapshot):
+        alerts_json = json.dumps([a.value for a in snapshot.alerts_sent])
+        await self.db.execute("""
+            UPDATE tracked_tokens
+            SET current_liquidity = ?, current_volume_24h = ?, current_price = ?,
+                last_checked = ?, alerts_sent = ?
+            WHERE address = ?
+        """, (
+            snapshot.current_liquidity, snapshot.current_volume_24h, snapshot.current_price,
+            datetime.now(), alerts_json, snapshot.address
+        ))
+        await self.db.commit()
+    
+    async def log_alert(self, address: str, alert_type: AlertType, change_pct: float, message: str):
+        await self.db.execute("""
+            INSERT INTO alert_history (address, alert_type, metric_change_pct, message)
+            VALUES (?, ?, ?, ?)
+        """, (address, alert_type.value, change_pct, message))
+        await self.db.commit()
+    
+    async def cleanup_old_tracked_tokens(self):
+        cutoff = datetime.now() - timedelta(hours=FOLLOWUP_TRACK_DURATION_HOURS)
+        await self.db.execute("DELETE FROM tracked_tokens WHERE posted_at < ?", (cutoff,))
+        await self.db.commit()
+        logger.debug("Cleaned up old tracked tokens")
     
     async def close(self):
         if self.db:
@@ -412,6 +556,161 @@ class DexScreenerMonitor:
         if self.session:
             await self.session.close()
 
+class TokenFollowUpMonitor:
+    def __init__(self, db: TokenDatabase, publisher: 'TelegramPublisher', session: aiohttp.ClientSession):
+        self.db = db
+        self.publisher = publisher
+        self.session = session
+        self.running = False
+    
+    async def start(self):
+        self.running = True
+        logger.info(f"🔍 Follow-up monitor started (checking every {FOLLOWUP_CHECK_INTERVAL}s)")
+        
+        while self.running:
+            try:
+                await self._check_tracked_tokens()
+                await asyncio.sleep(FOLLOWUP_CHECK_INTERVAL)
+                
+                # Cleanup old tokens once per hour
+                if datetime.now().minute == 0:
+                    await self.db.cleanup_old_tracked_tokens()
+                    
+            except Exception as e:
+                logger.error(f"Error in follow-up monitoring loop: {e}", exc_info=True)
+                await asyncio.sleep(FOLLOWUP_CHECK_INTERVAL)
+    
+    async def _check_tracked_tokens(self):
+        tracked_tokens = await self.db.get_active_tracked_tokens()
+        
+        if not tracked_tokens:
+            logger.debug("No tokens currently being tracked")
+            return
+        
+        logger.info(f"Checking {len(tracked_tokens)} tracked tokens...")
+        
+        for snapshot in tracked_tokens:
+            try:
+                current_data = await self._fetch_current_metrics(snapshot.pair_address or snapshot.address)
+                
+                if not current_data:
+                    logger.debug(f"Could not fetch current data for {snapshot.symbol}")
+                    continue
+                
+                snapshot.current_liquidity = current_data.get("liquidity", 0)
+                snapshot.current_volume_24h = current_data.get("volume_24h", 0)
+                snapshot.current_price = current_data.get("price", 0)
+                snapshot.last_checked = datetime.now()
+                
+                alerts = await self._analyze_changes(snapshot)
+                
+                for alert_type, change_pct, message in alerts:
+                    if alert_type not in snapshot.alerts_sent:
+                        await self.publisher.publish_update(snapshot, alert_type, change_pct, message)
+                        snapshot.alerts_sent.add(alert_type)
+                        await self.db.log_alert(snapshot.address, alert_type, change_pct, message)
+                        logger.info(f"  🚨 Alert sent: {snapshot.symbol} - {alert_type.value}")
+                
+                await self.db.update_tracked_token(snapshot)
+                await asyncio.sleep(1)
+                
+            except Exception as e:
+                logger.error(f"Error checking {snapshot.symbol}: {e}")
+    
+    async def _fetch_current_metrics(self, address: str) -> Optional[dict]:
+        try:
+            url = f"{DEXSCREENER_API}/latest/dex/tokens/{address}"
+            
+            async with self.session.get(url, timeout=10) as resp:
+                if resp.status != 200:
+                    return None
+                
+                data = await resp.json()
+                pairs = data.get("pairs", [])
+                
+                if not pairs:
+                    return None
+                
+                pairs.sort(key=lambda x: float(x.get("liquidity", {}).get("usd", 0)), reverse=True)
+                pair = pairs[0]
+                
+                return {
+                    "liquidity": float(pair.get("liquidity", {}).get("usd", 0)),
+                    "volume_24h": float(pair.get("volume", {}).get("h24", 0)),
+                    "price": float(pair.get("priceUsd", 0))
+                }
+                
+        except Exception as e:
+            logger.debug(f"Error fetching metrics: {e}")
+            return None
+    
+    async def _analyze_changes(self, snapshot: TokenSnapshot) -> List[tuple]:
+        alerts = []
+        
+        def calc_pct_change(initial: float, current: float) -> float:
+            if initial == 0:
+                return 0
+            return ((current - initial) / initial) * 100
+        
+        liq_change = calc_pct_change(snapshot.initial_liquidity, snapshot.current_liquidity)
+        vol_change = calc_pct_change(snapshot.initial_volume_24h, snapshot.current_volume_24h)
+        price_change = calc_pct_change(snapshot.initial_price, snapshot.current_price)
+        
+        # Volume drop alert
+        if vol_change <= -ALERT_VOLUME_DROP_PCT:
+            alerts.append((
+                AlertType.VOLUME_DROP,
+                vol_change,
+                f"Volume dropped {abs(vol_change):.1f}% (${snapshot.current_volume_24h:,.0f})"
+            ))
+        
+        # Liquidity drop alert (potential rug)
+        if liq_change <= -ALERT_LIQUIDITY_DROP_PCT:
+            alerts.append((
+                AlertType.LIQUIDITY_DROP,
+                liq_change,
+                f"Liquidity removed {abs(liq_change):.1f}% (${snapshot.current_liquidity:,.0f} left)"
+            ))
+        
+        # Price drop alert
+        if price_change <= -ALERT_PRICE_DROP_PCT:
+            alerts.append((
+                AlertType.PRICE_DROP,
+                price_change,
+                f"Price crashed {abs(price_change):.1f}%"
+            ))
+        
+        # Combined rug warning
+        if (liq_change <= -40 and vol_change <= -40 and price_change <= -30):
+            if AlertType.RUG_WARNING not in snapshot.alerts_sent:
+                alerts.append((
+                    AlertType.RUG_WARNING,
+                    liq_change,
+                    f"⚠️ POSSIBLE RUG: Liq {liq_change:.0f}%, Vol {vol_change:.0f}%, Price {price_change:.0f}%"
+                ))
+        
+        # Volume spike (positive)
+        if vol_change >= ALERT_VOLUME_SPIKE_PCT:
+            alerts.append((
+                AlertType.VOLUME_SPIKE,
+                vol_change,
+                f"Volume surged +{vol_change:.0f}% (${snapshot.current_volume_24h:,.0f})"
+            ))
+        
+        # Price spike (moon signal)
+        if price_change >= ALERT_PRICE_SPIKE_PCT:
+            alerts.append((
+                AlertType.PRICE_SPIKE,
+                price_change,
+                f"Price mooning +{price_change:.0f}%! 🚀"
+            ))
+        
+        return alerts
+    
+    async def stop(self):
+        self.running = False
+        logger.info("Follow-up monitor stopped")
+
 class TelegramPublisher:
     def __init__(self, bot_token: str, channel_id: str):
         self.bot = Bot(token=bot_token)
@@ -426,7 +725,7 @@ class TelegramPublisher:
             await asyncio.sleep(wait_time)
         message = self._format_message(token)
         try:
-            await self.bot.send_message(
+            sent_message = await self.bot.send_message(
                 chat_id=self.channel_id,
                 text=message,
                 parse_mode=ParseMode.HTML,
@@ -434,8 +733,10 @@ class TelegramPublisher:
             )
             self.last_post_time = time.time()
             logger.info(f"✓ Posted: {token.symbol} (score: {token.conviction_score:.0f})")
+            return sent_message.message_id  # Return message_id for tracking
         except Exception as e:
             logger.error(f"Failed to post {token.symbol}: {e}")
+            return None
     
     def _format_message(self, token: TokenData) -> str:
         conviction_emoji = "🔥🔥🔥" if token.conviction_score >= 80 else "🔥🔥" if token.conviction_score >= 65 else "🔥"
@@ -482,6 +783,156 @@ class TelegramPublisher:
 
 ⚠️ <b>DYOR:</b> Not financial advice. High risk = high reward.
 """.strip()
+    
+    async def publish_update(self, snapshot: TokenSnapshot, alert_type: AlertType, change_pct: float, message: str):
+        """Publish a follow-up alert for a previously posted token"""
+        
+        if alert_type in [AlertType.RUG_WARNING, AlertType.LIQUIDITY_DROP]:
+            emoji = "🚨"
+            urgency = "CRITICAL"
+        elif alert_type in [AlertType.VOLUME_DROP, AlertType.PRICE_DROP]:
+            emoji = "⚠️"
+            urgency = "WARNING"
+        else:
+            emoji = "🚀"
+            urgency = "UPDATE"
+        
+        time_since = datetime.now() - snapshot.posted_at
+        hours = int(time_since.total_seconds() / 3600)
+        minutes = int((time_since.total_seconds() % 3600) / 60)
+        time_str = f"{hours}h {minutes}m" if hours > 0 else f"{minutes}m"
+        
+        dexscreener = f"https://dexscreener.com/solana/{snapshot.pair_address or snapshot.address}"
+        
+        def calc_pct(init, curr):
+            return ((curr - init) / init * 100) if init else 0
+        
+        formatted_message = f"""
+{emoji} <b>{urgency}: ${snapshot.symbol}</b> {emoji}
+
+<b>{message}</b>
+
+<b>Time Since Posted:</b> {time_str} ago
+<b>Original Conviction:</b> {snapshot.conviction_score:.0f}/100
+
+<b>Metrics Comparison:</b>
+• Liquidity: ${snapshot.initial_liquidity:,.0f} → ${snapshot.current_liquidity:,.0f}
+• Volume: ${snapshot.initial_volume_24h:,.0f} → ${snapshot.current_volume_24h:,.0f}
+• Price Change: {calc_pct(snapshot.initial_price, snapshot.current_price):+.1f}%
+
+<b>Chart:</b> <a href='{dexscreener}'>DexScreener</a>
+""".strip()
+        
+        try:
+            await self.bot.send_message(
+                chat_id=self.channel_id,
+                text=formatted_message,
+                parse_mode=ParseMode.HTML,
+                disable_web_page_preview=False
+            )
+            logger.info(f"✓ Update posted: {snapshot.symbol} ({alert_type.value})")
+        except Exception as e:
+            logger.error(f"Failed to post update for {snapshot.symbol}: {e}")
+
+class SentinelSignals:
+    def __init__(self):
+        self.db = TokenDatabase(DB_PATH)
+        self.filter_engine = ConvictionFilter()
+        self.publisher = TelegramPublisher(TELEGRAM_TOKEN, CHANNEL_ID)
+        self.monitor = DexScreenerMonitor()
+        self.followup_monitor = None
+        self.running = False
+    
+    async def start(self):
+        logger.info("=" * 60)
+        logger.info("SENTINEL SIGNALS - DexScreener Edition with Follow-Up")
+        logger.info("=" * 60)
+        
+        await self.db.connect()
+        
+        self.followup_monitor = TokenFollowUpMonitor(
+            self.db,
+            self.publisher,
+            self.monitor.session
+        )
+        
+        self.running = True
+        tasks = [
+            asyncio.create_task(self.monitor.start(self.process_token)),
+            asyncio.create_task(self.followup_monitor.start()),
+            asyncio.create_task(healthcheck_server()),
+        ]
+        
+        logger.info("✓ All systems operational")
+        logger.info(f"✓ Polling DexScreener every {POLL_INTERVAL}s")
+        logger.info(f"✓ Follow-up checks every {FOLLOWUP_CHECK_INTERVAL}s")
+        logger.info(f"✓ Healthcheck: http://0.0.0.0:{HEALTHCHECK_PORT}/health")
+        
+        try:
+            await asyncio.gather(*tasks)
+        except KeyboardInterrupt:
+            logger.info("Shutdown signal received...")
+            await self.stop()
+    
+    async def process_token(self, token: TokenData):
+        if await self.db.is_seen(token.address):
+            return
+        
+        logger.info(f"New token: {token.symbol} ({token.address[:8]}...)")
+        
+        safe, reason = await self.filter_engine.safety_check(token)
+        if not safe:
+            logger.debug(f"  ✗ Filtered: {reason}")
+            await self.db.mark_seen(token, posted=False)
+            return
+        
+        score, reasons = await self.filter_engine.calculate_conviction(token)
+        token.conviction_score = score
+        token.conviction_reasons = reasons
+        
+        logger.info(f"  ✓ Scored {score:.0f}/100")
+        
+        if score < 60:
+            logger.info(f"  ✗ Below threshold (60)")
+            await self.db.mark_seen(token, posted=False)
+            return
+        
+        recent_posts = await self.db.get_recent_posts_count(hours=1)
+        if recent_posts >= MAX_SIGNALS_PER_HOUR:
+            logger.warning(f"  ⏸ Hourly limit reached ({recent_posts}/{MAX_SIGNALS_PER_HOUR})")
+            await self.db.mark_seen(token, posted=False)
+            return
+        
+        try:
+            sent_message = await self.publisher.publish_signal(token)
+            await self.db.mark_seen(token, posted=True)
+            
+            if sent_message:
+                snapshot = TokenSnapshot(
+                    address=token.address,
+                    symbol=token.symbol,
+                    name=token.name,
+                    pair_address=token.pair_address,
+                    posted_at=datetime.now(),
+                    initial_liquidity=token.liquidity_usd,
+                    initial_volume_24h=token.volume_24h,
+                    initial_price=token.price_usd,
+                    conviction_score=token.conviction_score
+                )
+                await self.db.add_tracked_token(snapshot)
+            
+            logger.info(f"  🚀 POSTED: {token.symbol} | Score: {score:.0f}/100")
+        except Exception as e:
+            logger.error(f"  ✗ Publish failed: {e}")
+    
+    async def stop(self):
+        logger.info("Shutting down gracefully...")
+        self.running = False
+        await self.monitor.stop()
+        if self.followup_monitor:
+            await self.followup_monitor.stop()
+        await self.db.close()
+        logger.info("✓ Shutdown complete")
 
 async def healthcheck_server():
     async def health(request):
@@ -501,69 +952,6 @@ async def healthcheck_server():
     site = web.TCPSite(runner, '0.0.0.0', HEALTHCHECK_PORT)
     await site.start()
     logger.info(f"✓ Healthcheck server started on port {HEALTHCHECK_PORT}")
-
-class SentinelSignals:
-    def __init__(self):
-        self.db = TokenDatabase(DB_PATH)
-        self.filter_engine = ConvictionFilter()
-        self.publisher = TelegramPublisher(TELEGRAM_TOKEN, CHANNEL_ID)
-        self.monitor = DexScreenerMonitor()
-        self.running = False
-    
-    async def start(self):
-        logger.info("=" * 60)
-        logger.info("SENTINEL SIGNALS - DexScreener Edition")
-        logger.info("=" * 60)
-        await self.db.connect()
-        self.running = True
-        tasks = [
-            asyncio.create_task(self.monitor.start(self.process_token)),
-            asyncio.create_task(healthcheck_server()),
-        ]
-        logger.info("✓ All systems operational")
-        logger.info(f"✓ Polling DexScreener every {POLL_INTERVAL}s")
-        logger.info(f"✓ Healthcheck: http://0.0.0.0:{HEALTHCHECK_PORT}/health")
-        try:
-            await asyncio.gather(*tasks)
-        except KeyboardInterrupt:
-            logger.info("Shutdown signal received...")
-            await self.stop()
-    
-    async def process_token(self, token: TokenData):
-        if await self.db.is_seen(token.address):
-            return
-        logger.info(f"New token: {token.symbol} ({token.address[:8]}...)")
-        safe, reason = await self.filter_engine.safety_check(token)
-        if not safe:
-            logger.debug(f"  ✗ Filtered: {reason}")
-            await self.db.mark_seen(token, posted=False)
-            return
-        score, reasons = await self.filter_engine.calculate_conviction(token)
-        token.conviction_score = score
-        token.conviction_reasons = reasons
-        logger.info(f"  ✓ Scored {score:.0f}/100")
-        if score < 60:
-            logger.info(f"  ✗ Below threshold (60)")
-            await self.db.mark_seen(token, posted=False)
-            return
-        recent_posts = await self.db.get_recent_posts_count(hours=1)
-        if recent_posts >= MAX_SIGNALS_PER_HOUR:
-            logger.warning(f"  ⏸ Hourly limit reached ({recent_posts}/{MAX_SIGNALS_PER_HOUR})")
-            await self.db.mark_seen(token, posted=False)
-            return
-        try:
-            await self.publisher.publish_signal(token)
-            await self.db.mark_seen(token, posted=True)
-            logger.info(f"  🚀 POSTED: {token.symbol} | Score: {score:.0f}/100")
-        except Exception as e:
-            logger.error(f"  ✗ Publish failed: {e}")
-    
-    async def stop(self):
-        logger.info("Shutting down gracefully...")
-        self.running = False
-        await self.monitor.stop()
-        await self.db.close()
-        logger.info("✓ Shutdown complete")
 
 async def main():
     if not all([TELEGRAM_TOKEN, CHANNEL_ID]):
