@@ -619,7 +619,47 @@ class PerformanceTracker:
                 if not pairs: return None
                 return {"price": float(pairs[0].get("priceUsd", 0))}
         except: return None
+
+    class OutcomeTracker:
+    """Tracks outcomes to feed ML training - Makes ML learn over time!"""
+    def __init__(self, db: TokenDatabase, ml_engine: Optional['MLLearningEngine']):
+        self.db = db
+        self.ml_engine = ml_engine
+        self.running = False
     
+    async def start(self):
+        self.running = True
+        logger.info("📊 Outcome tracker started (feeds ML)")
+        while self.running:
+            try:
+                await self._check_outcomes()
+                await asyncio.sleep(3600)
+                if self.ml_engine: await self.ml_engine.train_model()
+            except Exception as e:
+                logger.error(f"Outcome tracker: {e}")
+                await asyncio.sleep(3600)
+    
+    async def _check_outcomes(self):
+        cutoff_min = datetime.now() - timedelta(hours=48)
+        cutoff_max = datetime.now() - timedelta(hours=24)
+        cursor = await self.db.db.execute("""
+            SELECT t.address, t.initial_price, t.posted_at, p.max_multiple
+            FROM tracked_tokens t
+            LEFT JOIN performance_tracking p ON t.address = p.address
+            WHERE t.posted_at BETWEEN ? AND ?
+            AND t.address NOT IN (SELECT address FROM ml_outcomes)
+        """, (cutoff_min, cutoff_max))
+        rows = await cursor.fetchall()
+        for row in rows:
+            address, initial_price, posted_at, max_multiple = row
+            if not initial_price or not max_multiple: continue
+            gain_pct = (max_multiple - 1) * 100
+            outcome = "success" if gain_pct >= 50 else "failure"
+            await self.db.db.execute("INSERT INTO ml_outcomes (address, posted_at, peak_price, final_outcome, gain_percent, recorded_at) VALUES (?, ?, ?, ?, ?, ?)",
+                (address, posted_at, initial_price * max_multiple, outcome, gain_pct, datetime.now()))
+            await self.db.db.commit()
+            logger.info(f"📊 Outcome: {address[:8]} = {outcome} ({gain_pct:+.0f}%)")    
+            
     async def stop(self):
         self.running = False
 
