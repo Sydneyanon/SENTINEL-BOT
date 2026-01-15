@@ -367,7 +367,7 @@ class MLLearningEngine:
         except: return base_score, "ML error"
 
      async def train_model(self):
-        # rrain ML model on historical outcomes
+        # train ML model on historical outcomes
         logger.info("🧠 Training ML model...")
         data = await self.db.get_training_data(500)
         if len(data) < 50:
