@@ -1,10 +1,8 @@
 """
 Sentinel Signals - Elite Solana Memecoin Signal Bot
-Architecture: DexScreener polling → Multi-tier filters → Telegram publisher
+Architecture: DexScreener API polling → Multi-tier filters → Telegram publisher
 Author: Built for high-conviction signals (5-15/day win rate optimization)
 Railway Deployment: Production ready with healthchecks and graceful shutdown
-
-NOTE: Switched to DexScreener API (no key required) due to Birdeye/Pump.fun blocks
 """
 
 import os
@@ -50,19 +48,18 @@ TELEGRAM_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN")
 CHANNEL_ID = os.getenv("TELEGRAM_CHANNEL_ID")
 
 # DexScreener API (no key required!)
-DEXSCREENER_API = "https://api.dexscreener.com/latest/dex"
-POLL_INTERVAL = int(os.getenv("POLL_INTERVAL_SECONDS", 30))  # How often to check for new tokens
+DEXSCREENER_API = "https://api.dexscreener.com"
+POLL_INTERVAL = int(os.getenv("POLL_INTERVAL_SECONDS", 45))
 
 # Filter Thresholds
 MIN_DESC_LEN = int(os.getenv("MIN_DESCRIPTION_LENGTH", 30))
-MIN_LIQUIDITY = float(os.getenv("MIN_LIQUIDITY_USD", 5000))
-MAX_TOP_HOLDER = float(os.getenv("MAX_TOP_HOLDER_PERCENT", 20))
-MIN_AGE_MINUTES = int(os.getenv("MIN_TOKEN_AGE_MINUTES", 5))  # Avoid instant rugs
-MAX_AGE_HOURS = int(os.getenv("MAX_TOKEN_AGE_HOURS", 24))  # Only fresh launches
+MIN_LIQUIDITY = float(os.getenv("MIN_LIQUIDITY_USD", 8000))
+MIN_AGE_MINUTES = int(os.getenv("MIN_TOKEN_AGE_MINUTES", 10))
+MAX_AGE_HOURS = int(os.getenv("MAX_TOKEN_AGE_HOURS", 12))
 
 # Operational
-MAX_SIGNALS_PER_HOUR = int(os.getenv("MAX_SIGNALS_PER_HOUR", 3))
-COOLDOWN_SEC = int(os.getenv("COOLDOWN_BETWEEN_POSTS_SEC", 180))
+MAX_SIGNALS_PER_HOUR = int(os.getenv("MAX_SIGNALS_PER_HOUR", 2))
+COOLDOWN_SEC = int(os.getenv("COOLDOWN_BETWEEN_POSTS_SEC", 300))
 DB_PATH = os.getenv("DATABASE_PATH", "./data/sentinel.db")
 LOG_LEVEL = os.getenv("LOG_LEVEL", "INFO")
 LOG_FILE = os.getenv("LOG_FILE", "./logs/sentinel.log")
@@ -119,6 +116,7 @@ class TokenData:
     conviction_score: float = 0.0
     conviction_reasons: List[str] = None
     dex: str = ""
+    pair_address: str = ""
     
     def __post_init__(self):
         if self.conviction_reasons is None:
@@ -199,10 +197,6 @@ class ConvictionFilter:
         # Social presence check
         if not token.twitter and not token.telegram and not token.website:
             return False, "No social links (likely scam)"
-        
-        # Description check (relaxed for DexScreener)
-        if len(token.description) < MIN_DESC_LEN and not (token.twitter or token.telegram):
-            return False, f"No description and no socials"
         
         # Liquidity check
         if token.liquidity_usd < MIN_LIQUIDITY:
@@ -316,7 +310,6 @@ class DexScreenerMonitor:
     def __init__(self):
         self.session: Optional[aiohttp.ClientSession] = None
         self.running = False
-        self.last_check = None
     
     async def start(self, callback):
         self.running = True
@@ -326,63 +319,114 @@ class DexScreenerMonitor:
         
         while self.running:
             try:
-                await self._fetch_new_tokens(callback)
+                await self._fetch_latest_profiles(callback)
                 await asyncio.sleep(POLL_INTERVAL)
             except Exception as e:
                 logger.error(f"Error in DexScreener polling loop: {e}", exc_info=True)
                 await asyncio.sleep(POLL_INTERVAL)
     
-    async def _fetch_new_tokens(self, callback):
+    async def _fetch_latest_profiles(self, callback):
+        """Fetch latest token profiles from DexScreener"""
         try:
-            # Get latest tokens on Solana from DexScreener
-            url = f"{DEXSCREENER_API}/tokens/solana"
+            # Use the token profiles endpoint - this shows recently added tokens
+            url = f"{DEXSCREENER_API}/token-profiles/latest/v1"
             
-            # We'll search for tokens with recent activity
-            # DexScreener has a /search/pairs endpoint we can use
-            search_url = f"{DEXSCREENER_API}/search/pairs?q=SOL"
-            
-            async with self.session.get(search_url, timeout=15) as resp:
+            async with self.session.get(url, timeout=15) as resp:
                 if resp.status != 200:
-                    logger.warning(f"DexScreener returned {resp.status}")
+                    logger.warning(f"DexScreener profiles returned {resp.status}")
+                    # Fallback to search endpoint
+                    await self._search_trending_tokens(callback)
+                    return
+                
+                data = await resp.json()
+                profiles = data if isinstance(data, list) else []
+                
+                if not profiles:
+                    logger.debug("No token profiles found")
+                    return
+                
+                logger.info(f"Found {len(profiles)} token profiles from DexScreener")
+                
+                # Filter for Solana only
+                solana_profiles = [p for p in profiles if p.get("chainId") == "solana"]
+                
+                for profile in solana_profiles[:15]:  # Check top 15
+                    try:
+                        # Get full token data for each profile
+                        token_addr = profile.get("tokenAddress")
+                        if token_addr:
+                            token_data = await self._fetch_token_pairs(token_addr, profile)
+                            if token_data:
+                                await callback(token_data)
+                    except Exception as e:
+                        logger.debug(f"Error processing profile: {e}")
+                
+        except asyncio.TimeoutError:
+            logger.warning("DexScreener request timeout")
+        except Exception as e:
+            logger.error(f"Error fetching profiles: {e}")
+    
+    async def _search_trending_tokens(self, callback):
+        """Fallback: Search for trending Solana tokens"""
+        try:
+            # Search for high-volume SOL pairs
+            url = f"{DEXSCREENER_API}/latest/dex/search?q=SOL"
+            
+            async with self.session.get(url, timeout=15) as resp:
+                if resp.status != 200:
+                    logger.warning(f"DexScreener search returned {resp.status}")
                     return
                 
                 data = await resp.json()
                 pairs = data.get("pairs", [])
                 
-                if not pairs:
-                    logger.debug("No pairs found in DexScreener response")
-                    return
-                
-                logger.info(f"Found {len(pairs)} pairs from DexScreener")
-                
-                # Filter for Solana pairs only
+                # Filter for Solana and sort by volume
                 solana_pairs = [p for p in pairs if p.get("chainId") == "solana"]
+                solana_pairs.sort(key=lambda x: float(x.get("volume", {}).get("h24", 0)), reverse=True)
                 
-                for pair in solana_pairs[:20]:  # Check top 20 most active
+                logger.info(f"Found {len(solana_pairs)} Solana pairs via search")
+                
+                for pair in solana_pairs[:10]:
                     try:
                         token_data = await self._parse_pair(pair)
                         if token_data:
                             await callback(token_data)
                     except Exception as e:
-                        logger.debug(f"Error parsing pair: {e}")
-                
-        except asyncio.TimeoutError:
-            logger.warning("DexScreener request timeout")
+                        logger.debug(f"Error parsing search pair: {e}")
         except Exception as e:
-            logger.error(f"Error fetching from DexScreener: {e}")
+            logger.debug(f"Search fallback error: {e}")
     
-    async def _parse_pair(self, pair: dict) -> Optional[TokenData]:
+    async def _fetch_token_pairs(self, token_address: str, profile: dict) -> Optional[TokenData]:
+        """Fetch pair data for a specific token"""
+        try:
+            url = f"{DEXSCREENER_API}/latest/dex/tokens/{token_address}"
+            
+            async with self.session.get(url, timeout=10) as resp:
+                if resp.status != 200:
+                    return None
+                
+                data = await resp.json()
+                pairs = data.get("pairs", [])
+                
+                if not pairs:
+                    return None
+                
+                # Get the pair with highest liquidity
+                pairs.sort(key=lambda x: float(x.get("liquidity", {}).get("usd", 0)), reverse=True)
+                best_pair = pairs[0]
+                
+                # Merge profile data with pair data
+                return await self._parse_pair(best_pair, profile)
+                
+        except Exception as e:
+            logger.debug(f"Error fetching token pairs: {e}")
+            return None
+    
+    async def _parse_pair(self, pair: dict, profile: dict = None) -> Optional[TokenData]:
         try:
             base_token = pair.get("baseToken", {})
-            quote_token = pair.get("quoteToken", {})
             
-            # We want the non-SOL token
-            if quote_token.get("symbol") == "SOL":
-                token_info = base_token
-            else:
-                token_info = quote_token
-            
-            address = token_info.get("address")
+            address = base_token.get("address")
             if not address:
                 return None
             
@@ -402,41 +446,62 @@ class DexScreenerMonitor:
             txns = pair.get("txns", {})
             h24 = txns.get("h24", {})
             
-            # Get social links from info
-            info = pair.get("info", {})
-            socials = info.get("socials", []) if info else []
-            
+            # Get social links from profile or pair info
             twitter = ""
             telegram = ""
             website = ""
+            description = ""
             
-            for social in socials:
-                s_type = social.get("type", "").lower()
-                if s_type == "twitter":
-                    twitter = social.get("url", "")
-                elif s_type == "telegram":
-                    telegram = social.get("url", "")
-                elif s_type == "website":
-                    website = social.get("url", "")
+            if profile:
+                description = profile.get("description", "")
+                links = profile.get("links", [])
+                for link in links:
+                    link_type = link.get("type", "").lower()
+                    link_url = link.get("url", "")
+                    if "twitter" in link_type or "x.com" in link_url:
+                        twitter = link_url
+                    elif "telegram" in link_type or "t.me" in link_url:
+                        telegram = link_url
+                    elif "website" in link_type:
+                        website = link_url
+            
+            # Also check pair info
+            info = pair.get("info", {})
+            if info:
+                socials = info.get("socials", [])
+                websites = info.get("websites", [])
+                
+                for social in socials:
+                    s_type = social.get("type", "").lower()
+                    s_url = social.get("url", "")
+                    if "twitter" in s_type and not twitter:
+                        twitter = s_url
+                    elif "telegram" in s_type and not telegram:
+                        telegram = s_url
+                
+                for site in websites:
+                    if not website:
+                        website = site.get("url", "")
             
             return TokenData(
                 address=address,
-                symbol=token_info.get("symbol", ""),
-                name=token_info.get("name", ""),
-                description="",  # DexScreener doesn't provide this
+                symbol=base_token.get("symbol", ""),
+                name=base_token.get("name", ""),
+                description=description,
                 twitter=twitter,
                 telegram=telegram,
                 website=website,
                 liquidity_usd=float(pair.get("liquidity", {}).get("usd", 0)),
                 volume_24h=float(pair.get("volume", {}).get("h24", 0)),
-                market_cap=float(pair.get("fdv", 0)),  # Fully diluted valuation
+                market_cap=float(pair.get("fdv", 0)),
                 price_change_24h=float(price_change.get("h24", 0)),
                 price_change_1h=float(price_change.get("h1", 0)),
                 txns_24h_buys=int(h24.get("buys", 0)),
                 txns_24h_sells=int(h24.get("sells", 0)),
                 source="dexscreener",
                 launch_time=launch_time,
-                dex=pair.get("dexId", "")
+                dex=pair.get("dexId", ""),
+                pair_address=pair.get("pairAddress", "")
             )
             
         except Exception as e:
@@ -488,7 +553,7 @@ class TelegramPublisher:
         if token.website: socials.append(f"<a href='{token.website}'>Website</a>")
         social_links = " | ".join(socials) if socials else "N/A"
         
-        dexscreener = f"https://dexscreener.com/solana/{token.address}"
+        dexscreener = f"https://dexscreener.com/solana/{token.pair_address or token.address}"
         birdeye = f"https://birdeye.so/token/{token.address}?chain=solana"
         
         reasons_text = "\n".join([f"  • {r}" for r in token.conviction_reasons[:6]])
@@ -681,7 +746,3 @@ if __name__ == "__main__":
         asyncio.run(main())
     except KeyboardInterrupt:
         logger.info("Process interrupted by user")
-        sys.exit(0)
-    except Exception as e:
-        logger.critical(f"Unhandled exception in main: {e}", exc_info=True)
-        sys.exit(1)
