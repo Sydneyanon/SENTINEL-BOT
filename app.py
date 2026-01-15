@@ -597,7 +597,7 @@ class TelegramPublisher:
         age = ""
         if token.launch_time:
             hrs = (datetime.now() - token.launch_time).total_seconds() / 3600
-            age = f"⚡ <{int(hrs * 60)}m old" if hrs < 1 else f"🕐 ~{int(hrs)}h old"
+            age = f"⚡ &lt;{int(hrs * 60)}m old" if hrs < 1 else f"🕐 ~{int(hrs)}h old"
         msg = f"""{emoji} <b>HIGH CONVICTION SIGNAL</b> {emoji}
 
 <b>{token.name}</b> (${token.symbol})
