@@ -1,6 +1,6 @@
 """
-Sentinel Signals - DexScreener Edition with Follow-Up Monitoring
-Part 1 + Part 2 fully integrated
+Sentinel Signals - DexScreener Edition with Follow-Up + Performance Tracking
+Full integrated version - ready to deploy
 """
 
 import os
@@ -47,7 +47,7 @@ LOG_LEVEL = os.getenv("LOG_LEVEL", "INFO")
 LOG_FILE = os.getenv("LOG_FILE", "./logs/sentinel.log")
 HEALTHCHECK_PORT = int(os.getenv("PORT", 8080))
 
-# Follow-up Monitoring (added after HEALTHCHECK_PORT line)
+# Follow-up Monitoring
 FOLLOWUP_CHECK_INTERVAL = int(os.getenv("FOLLOWUP_CHECK_INTERVAL_SEC", 300))  # 5 min
 FOLLOWUP_TRACK_DURATION_HOURS = int(os.getenv("FOLLOWUP_TRACK_DURATION_HOURS", 48))
 
@@ -57,6 +57,12 @@ ALERT_LIQUIDITY_DROP_PCT = float(os.getenv("ALERT_LIQUIDITY_DROP_PERCENT", 60))
 ALERT_VOLUME_SPIKE_PCT = float(os.getenv("ALERT_VOLUME_SPIKE_PERCENT", 200))
 ALERT_PRICE_SPIKE_PCT = float(os.getenv("ALERT_PRICE_SPIKE_PERCENT", 100))
 ALERT_PRICE_DROP_PCT = float(os.getenv("ALERT_PRICE_DROP_PERCENT", 50))
+
+# Performance Tracking
+PERFORMANCE_CHECK_INTERVAL = int(os.getenv("PERFORMANCE_CHECK_INTERVAL_SEC", 1800))  # 30 min
+PERFORMANCE_MILESTONES = [2.0, 3.0, 5.0]  # 2x, 3x, 5x
+PERFORMANCE_DRAWDOWN_ALERT = -50.0  # -50% from peak
+WEEKLY_SUMMARY_HOUR = 0  # UTC midnight
 
 try:
     db_dir = Path(DB_PATH).parent
@@ -157,7 +163,7 @@ class TokenDatabase:
             )
         """)
         
-        # NEW: Follow-up tracking tables
+        # Follow-up tracking
         await self.db.execute("""
             CREATE TABLE IF NOT EXISTS tracked_tokens (
                 address TEXT PRIMARY KEY,
@@ -185,6 +191,22 @@ class TokenDatabase:
                 alert_sent_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
                 metric_change_pct REAL,
                 message TEXT,
+                FOREIGN KEY (address) REFERENCES tracked_tokens(address)
+            )
+        """)
+        
+        # Performance tracking table
+        await self.db.execute("""
+            CREATE TABLE IF NOT EXISTS performance_tracking (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                address TEXT,
+                posted_at TIMESTAMP,
+                initial_price REAL,
+                price_1h REAL DEFAULT NULL,
+                price_6h REAL DEFAULT NULL,
+                price_24h REAL DEFAULT NULL,
+                max_multiple REAL DEFAULT 1.0,
+                last_checked TIMESTAMP,
                 FOREIGN KEY (address) REFERENCES tracked_tokens(address)
             )
         """)
@@ -217,7 +239,6 @@ class TokenDatabase:
         result = await cursor.fetchone()
         return result[0] if result else 0
     
-    # NEW: Follow-up tracking methods
     async def add_tracked_token(self, snapshot: TokenSnapshot):
         await self.db.execute("""
             INSERT OR REPLACE INTO tracked_tokens (
@@ -291,6 +312,42 @@ class TokenDatabase:
         await self.db.execute("DELETE FROM tracked_tokens WHERE posted_at < ?", (cutoff,))
         await self.db.commit()
         logger.debug("Cleaned up old tracked tokens")
+    
+    # Performance tracking methods
+    async def add_performance_tracking(self, address: str, initial_price: float):
+        await self.db.execute("""
+            INSERT OR IGNORE INTO performance_tracking 
+            (address, posted_at, initial_price, last_checked)
+            VALUES (?, ?, ?, ?)
+        """, (address, datetime.now(), initial_price, datetime.now()))
+        await self.db.commit()
+        logger.debug(f"Added performance tracking for {address}")
+    
+    async def get_tracked_performance(self) -> List[dict]:
+        cursor = await self.db.execute("""
+            SELECT address, initial_price, price_1h, price_6h, price_24h, max_multiple, last_checked
+            FROM performance_tracking
+        """)
+        rows = await cursor.fetchall()
+        return [{"address": r[0], "initial_price": r[1], "price_1h": r[2], "price_6h": r[3],
+                 "price_24h": r[4], "max_multiple": r[5], "last_checked": datetime.fromisoformat(r[6]) if r[6] else None}
+                for r in rows]
+    
+    async def update_performance_checkpoint(self, address: str, current_price: float, checkpoint: str):
+        await self.db.execute(f"""
+            UPDATE performance_tracking
+            SET price_{checkpoint} = ?, last_checked = ?
+            WHERE address = ?
+        """, (current_price, datetime.now(), address))
+        await self.db.commit()
+    
+    async def update_max_multiple(self, address: str, current_multiple: float):
+        await self.db.execute("""
+            UPDATE performance_tracking
+            SET max_multiple = GREATEST(max_multiple, ?), last_checked = ?
+            WHERE address = ?
+        """, (current_multiple, datetime.now(), address))
+        await self.db.commit()
     
     async def close(self):
         if self.db:
@@ -572,7 +629,6 @@ class TokenFollowUpMonitor:
                 await self._check_tracked_tokens()
                 await asyncio.sleep(FOLLOWUP_CHECK_INTERVAL)
                 
-                # Cleanup old tokens once per hour
                 if datetime.now().minute == 0:
                     await self.db.cleanup_old_tracked_tokens()
                     
@@ -656,7 +712,6 @@ class TokenFollowUpMonitor:
         vol_change = calc_pct_change(snapshot.initial_volume_24h, snapshot.current_volume_24h)
         price_change = calc_pct_change(snapshot.initial_price, snapshot.current_price)
         
-        # Volume drop alert
         if vol_change <= -ALERT_VOLUME_DROP_PCT:
             alerts.append((
                 AlertType.VOLUME_DROP,
@@ -664,7 +719,6 @@ class TokenFollowUpMonitor:
                 f"Volume dropped {abs(vol_change):.1f}% (${snapshot.current_volume_24h:,.0f})"
             ))
         
-        # Liquidity drop alert (potential rug)
         if liq_change <= -ALERT_LIQUIDITY_DROP_PCT:
             alerts.append((
                 AlertType.LIQUIDITY_DROP,
@@ -672,7 +726,6 @@ class TokenFollowUpMonitor:
                 f"Liquidity removed {abs(liq_change):.1f}% (${snapshot.current_liquidity:,.0f} left)"
             ))
         
-        # Price drop alert
         if price_change <= -ALERT_PRICE_DROP_PCT:
             alerts.append((
                 AlertType.PRICE_DROP,
@@ -680,7 +733,6 @@ class TokenFollowUpMonitor:
                 f"Price crashed {abs(price_change):.1f}%"
             ))
         
-        # Combined rug warning
         if (liq_change <= -40 and vol_change <= -40 and price_change <= -30):
             if AlertType.RUG_WARNING not in snapshot.alerts_sent:
                 alerts.append((
@@ -689,7 +741,6 @@ class TokenFollowUpMonitor:
                     f"⚠️ POSSIBLE RUG: Liq {liq_change:.0f}%, Vol {vol_change:.0f}%, Price {price_change:.0f}%"
                 ))
         
-        # Volume spike (positive)
         if vol_change >= ALERT_VOLUME_SPIKE_PCT:
             alerts.append((
                 AlertType.VOLUME_SPIKE,
@@ -697,7 +748,6 @@ class TokenFollowUpMonitor:
                 f"Volume surged +{vol_change:.0f}% (${snapshot.current_volume_24h:,.0f})"
             ))
         
-        # Price spike (moon signal)
         if price_change >= ALERT_PRICE_SPIKE_PCT:
             alerts.append((
                 AlertType.PRICE_SPIKE,
@@ -710,6 +760,91 @@ class TokenFollowUpMonitor:
     async def stop(self):
         self.running = False
         logger.info("Follow-up monitor stopped")
+
+class PerformanceTracker:
+    def __init__(self, db: TokenDatabase, publisher: 'TelegramPublisher', session: aiohttp.ClientSession):
+        self.db = db
+        self.publisher = publisher
+        self.session = session
+        self.running = False
+    
+    async def start(self):
+        self.running = True
+        logger.info(f"📊 Performance tracker started (checking every {PERFORMANCE_CHECK_INTERVAL}s)")
+        
+        while self.running:
+            try:
+                await self._check_performance()
+                await asyncio.sleep(PERFORMANCE_CHECK_INTERVAL)
+            except Exception as e:
+                logger.error(f"Error in performance tracking: {e}", exc_info=True)
+                await asyncio.sleep(PERFORMANCE_CHECK_INTERVAL)
+    
+    async def _check_performance(self):
+        tracked = await self.db.get_tracked_performance()
+        if not tracked:
+            return
+        
+        now = datetime.now()
+        for entry in tracked:
+            address = entry["address"]
+            initial_price = entry["initial_price"]
+            if initial_price <= 0:
+                continue
+            
+            current_data = await self._fetch_current_price(address)
+            if not current_data:
+                continue
+            
+            current_price = current_data.get("price", 0)
+            if current_price <= 0:
+                continue
+            
+            current_multiple = current_price / initial_price
+            await self.db.update_max_multiple(address, current_multiple)
+            
+            # Milestone alerts
+            for milestone in PERFORMANCE_MILESTONES:
+                if current_multiple >= milestone and (entry["max_multiple"] or 0) < milestone:
+                    await self.publisher.publish_performance_milestone(
+                        address, milestone, current_multiple, current_price
+                    )
+            
+            # Drawdown alert from peak
+            if current_multiple <= 1.0 + (PERFORMANCE_DRAWDOWN_ALERT / 100):
+                await self.publisher.publish_performance_drawdown(
+                    address, current_multiple, current_price
+                )
+            
+            # Checkpoint updates
+            age_hours = (now - entry["posted_at"]).total_seconds() / 3600
+            if 0.8 <= age_hours <= 1.2 and not entry["price_1h"]:
+                await self.db.update_performance_checkpoint(address, current_price, "1h")
+            if 5.5 <= age_hours <= 6.5 and not entry["price_6h"]:
+                await self.db.update_performance_checkpoint(address, current_price, "6h")
+            if 23.5 <= age_hours <= 24.5 and not entry["price_24h"]:
+                await self.db.update_performance_checkpoint(address, current_price, "24h")
+    
+    async def _fetch_current_price(self, address: str) -> Optional[dict]:
+        try:
+            url = f"{DEXSCREENER_API}/latest/dex/tokens/{address}"
+            async with self.session.get(url, timeout=10) as resp:
+                if resp.status != 200:
+                    return None
+                data = await resp.json()
+                pairs = data.get("pairs", [])
+                if not pairs:
+                    return None
+                pairs.sort(key=lambda x: float(x.get("liquidity", {}).get("usd", 0)), reverse=True)
+                pair = pairs[0]
+                return {"price": float(pair.get("priceUsd", 0))}
+        except Exception as e:
+            logger.debug(f"Error fetching price for {address}: {e}")
+            return None
+    
+    async def stop(self):
+        self.running = False
+        logger.info("Performance tracker stopped")
 
 class TelegramPublisher:
     def __init__(self, bot_token: str, channel_id: str):
@@ -733,7 +868,7 @@ class TelegramPublisher:
             )
             self.last_post_time = time.time()
             logger.info(f"✓ Posted: {token.symbol} (score: {token.conviction_score:.0f})")
-            return sent_message.message_id  # Return message_id for tracking
+            return sent_message.message_id
         except Exception as e:
             logger.error(f"Failed to post {token.symbol}: {e}")
             return None
@@ -785,11 +920,9 @@ class TelegramPublisher:
 """.strip()
     
     async def publish_update(self, snapshot: TokenSnapshot, alert_type: AlertType, change_pct: float, message: str):
-        """Publish a follow-up alert for a previously posted token"""
-        
         if alert_type in [AlertType.RUG_WARNING, AlertType.LIQUIDITY_DROP]:
             emoji = "🚨"
-            urgency = "CRITICAL"
+            urgency = "CRITICAL ALERT"
         elif alert_type in [AlertType.VOLUME_DROP, AlertType.PRICE_DROP]:
             emoji = "⚠️"
             urgency = "WARNING"
@@ -808,19 +941,21 @@ class TelegramPublisher:
             return ((curr - init) / init * 100) if init else 0
         
         formatted_message = f"""
-{emoji} <b>{urgency}: ${snapshot.symbol}</b> {emoji}
+{emoji} <b>FOLLOW-UP ON ${snapshot.symbol}</b> {emoji}
 
 <b>{message}</b>
 
-<b>Time Since Posted:</b> {time_str} ago
+<b>Time Since Original:</b> {time_str} ago
 <b>Original Conviction:</b> {snapshot.conviction_score:.0f}/100
 
 <b>Metrics Comparison:</b>
-• Liquidity: ${snapshot.initial_liquidity:,.0f} → ${snapshot.current_liquidity:,.0f}
-• Volume: ${snapshot.initial_volume_24h:,.0f} → ${snapshot.current_volume_24h:,.0f}
-• Price Change: {calc_pct(snapshot.initial_price, snapshot.current_price):+.1f}%
+• Liquidity: {calc_pct(snapshot.initial_liquidity, snapshot.current_liquidity):+.1f}%
+• Volume: {calc_pct(snapshot.initial_volume_24h, snapshot.current_volume_24h):+.1f}%
+• Price: {calc_pct(snapshot.initial_price, snapshot.current_price):+.1f}%
 
 <b>Chart:</b> <a href='{dexscreener}'>DexScreener</a>
+
+⚠️ DYOR: Updates based on latest data — act fast but wisely.
 """.strip()
         
         try:
@@ -833,6 +968,51 @@ class TelegramPublisher:
             logger.info(f"✓ Update posted: {snapshot.symbol} ({alert_type.value})")
         except Exception as e:
             logger.error(f"Failed to post update for {snapshot.symbol}: {e}")
+    
+    async def publish_performance_milestone(self, address: str, milestone: float, current_multiple: float, current_price: float):
+        message = f"""
+🚀 <b>PERFORMANCE UPDATE: {milestone:.1f}× ACHIEVED!</b> 🚀
+
+Token reached {current_multiple:.1f}× since signal
+Current price: ${current_price:.6f}
+Milestone: {milestone:.1f}×
+
+View on <a href='https://dexscreener.com/solana/{address}'>DexScreener</a>
+
+DYOR - Past performance not indicative of future results.
+"""
+        try:
+            await self.bot.send_message(
+                chat_id=self.channel_id,
+                text=message,
+                parse_mode=ParseMode.HTML,
+                disable_web_page_preview=False
+            )
+            logger.info(f"✓ Milestone posted: {address} @ {milestone:.1f}×")
+        except Exception as e:
+            logger.error(f"Failed to post milestone for {address}: {e}")
+    
+    async def publish_performance_drawdown(self, address: str, current_multiple: float, current_price: float):
+        message = f"""
+⚠️ <b>DRAWDOWN ALERT</b> ⚠️
+
+Token down to {current_multiple:.1f}× from peak (current price ${current_price:.6f})
+Watch for support or exit.
+
+View on <a href='https://dexscreener.com/solana/{address}'>DexScreener</a>
+
+DYOR - High volatility.
+"""
+        try:
+            await self.bot.send_message(
+                chat_id=self.channel_id,
+                text=message,
+                parse_mode=ParseMode.HTML,
+                disable_web_page_preview=False
+            )
+            logger.info(f"✓ Drawdown alert posted: {address}")
+        except Exception as e:
+            logger.error(f"Failed to post drawdown alert for {address}: {e}")
 
 class SentinelSignals:
     def __init__(self):
@@ -841,31 +1021,35 @@ class SentinelSignals:
         self.publisher = TelegramPublisher(TELEGRAM_TOKEN, CHANNEL_ID)
         self.monitor = DexScreenerMonitor()
         self.followup_monitor = None
+        self.performance_tracker = None
         self.running = False
     
     async def start(self):
         logger.info("=" * 60)
-        logger.info("SENTINEL SIGNALS - DexScreener Edition with Follow-Up")
+        logger.info("SENTINEL SIGNALS - DexScreener Edition with Follow-Up & Performance")
         logger.info("=" * 60)
         
         await self.db.connect()
         
         self.followup_monitor = TokenFollowUpMonitor(
-            self.db,
-            self.publisher,
-            self.monitor.session
+            self.db, self.publisher, self.monitor.session
+        )
+        self.performance_tracker = PerformanceTracker(
+            self.db, self.publisher, self.monitor.session
         )
         
         self.running = True
         tasks = [
             asyncio.create_task(self.monitor.start(self.process_token)),
             asyncio.create_task(self.followup_monitor.start()),
+            asyncio.create_task(self.performance_tracker.start()),
             asyncio.create_task(healthcheck_server()),
         ]
         
         logger.info("✓ All systems operational")
         logger.info(f"✓ Polling DexScreener every {POLL_INTERVAL}s")
         logger.info(f"✓ Follow-up checks every {FOLLOWUP_CHECK_INTERVAL}s")
+        logger.info(f"✓ Performance tracking every {PERFORMANCE_CHECK_INTERVAL}s")
         logger.info(f"✓ Healthcheck: http://0.0.0.0:{HEALTHCHECK_PORT}/health")
         
         try:
@@ -920,6 +1104,7 @@ class SentinelSignals:
                     conviction_score=token.conviction_score
                 )
                 await self.db.add_tracked_token(snapshot)
+                await self.db.add_performance_tracking(token.address, token.price_usd)
             
             logger.info(f"  🚀 POSTED: {token.symbol} | Score: {score:.0f}/100")
         except Exception as e:
@@ -931,6 +1116,8 @@ class SentinelSignals:
         await self.monitor.stop()
         if self.followup_monitor:
             await self.followup_monitor.stop()
+        if self.performance_tracker:
+            await self.performance_tracker.stop()
         await self.db.close()
         logger.info("✓ Shutdown complete")
 
