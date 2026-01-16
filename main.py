@@ -9,13 +9,14 @@ from typing import List, Dict, Optional
 from loguru import logger
 
 
+import os
+
 class Database:
     """SQLite database handler"""
-    
-    def __init__(self, db_path='signals.db'):
-        self.db_path = db_path
+    def __init__(self):
+        self.db_path = os.getenv("DATABASE_PATH", "/app/data/signals.db")  # ← Safe default for Railway
         self.conn = None
-    
+        
     async def initialize(self):
         """Initialize database and create tables"""
         self.conn = await aiosqlite.connect(self.db_path)
