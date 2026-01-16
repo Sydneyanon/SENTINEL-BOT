@@ -101,7 +101,7 @@ async def main():
     logger.info("✓ Telegram publisher ready")
     
     # Initialize DexScreener monitor
-    pumpfun = PumpFunMonitor()
+    pumpfun = PumpfunMonitor()
     logger.info("✓ PumpFun monitor ready")
     
     # Initialize performance tracker
