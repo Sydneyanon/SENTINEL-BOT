@@ -35,4 +35,4 @@ Base Score: 70
 KOL Boost: +15
 - 2 KOLs bought: CENTED, BRADJAE (+15)
 
-TOTAL: 85/100 ✅ POSTED
+TOTAL: 85/100 POSTED
