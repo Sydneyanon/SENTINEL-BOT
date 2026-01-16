@@ -105,7 +105,7 @@ async def main():
         logger.info("✓ Telegram publisher ready")
         
         # Initialize conviction filter
-        conviction_filter = ConvictionFilter(min_score=MIN_CONVICTION_SCORE)
+        conviction_filter = ConvictionFilter()
         logger.info(f"✓ Conviction filter ready (min score: {MIN_CONVICTION_SCORE})")
         
         # Initialize monitors
