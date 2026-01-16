@@ -15,7 +15,7 @@ from aiohttp import web
 load_dotenv()
 
 # Import all components
-from database import TokenDatabase
+from database import Database
 from telegram_publisher import TelegramPublisher
 from pumpfun_monitor import PumpfunMonitor
 from graduating_monitor import GraduatingMonitor
@@ -80,7 +80,7 @@ async def main():
     
     try:
         # Initialize database
-        db = TokenDatabase(DB_PATH)
+        db = Database(DB_PATH)
         await db.initialize()
         logger.info("✓ Database ready")
         
@@ -145,7 +145,7 @@ async def main():
                 signal_type = token_data.get('signal_type', 'graduated')
                 
                 # Check if already posted
-                if await db.is_token_seen(address):
+                if await db.has_seen(address):
                     logger.debug(f"Skipping {symbol} - already posted")
                     return
                 
@@ -179,12 +179,13 @@ async def main():
                     await telegram_publisher.post_signal(token_data)
                     
                     # Mark as seen and add to tracking
-                    await db.mark_token_seen(address, symbol, True, total_score)
+                    await db.save_signal(token_data, posted=True)
                     
                     logger.info(f"✅ Posted signal: {symbol} ({total_score}/100)")
                 else:
                     # Mark as seen but not posted
-                    await db.mark_token_seen(address, symbol, False, total_score)
+                    await db.save_signal(token_data, posted=False)
+                    
                     logger.debug(f"⏭️ Skipped {symbol} - score too low ({total_score} < {MIN_CONVICTION_SCORE})")
             
             except Exception as e:
