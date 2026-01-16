@@ -1,0 +1,7 @@
+[phases.setup]
+nixPkgs = ['python312']  # optional: force a specific Python if needed (check Railway docs for supported)
+
+[phases.build]
+cmds = [
+  "python -m pip install --upgrade pip setuptools wheel"
+]
