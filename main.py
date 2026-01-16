@@ -208,7 +208,7 @@ async def main():
         
         tasks = [
             asyncio.create_task(pumpfun.start(process_token)),
-            asyncio.create_task(kol_tracker.start(process_token)),
+            asyncio.create_task(kol_tracker.start()),
             asyncio.create_task(performance_tracker.start()),
             asyncio.create_task(momentum_analyzer.start()),
             asyncio.create_task(outcome_tracker.start()),
