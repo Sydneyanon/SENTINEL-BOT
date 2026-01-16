@@ -122,7 +122,7 @@ async def main():
     
     # Define token processing callback
     async def process_token(token_data: dict):
-        """Process new token from DexScreener"""
+        """Process new token from PumpFun"""
         try:
             # Check if already seen
             if await db.has_seen(token_data['address']):
@@ -150,7 +150,7 @@ async def main():
     # Start all tasks
     tasks = [
         asyncio.create_task(start_health_server()),  # Health check for Railway
-        asyncio.create_task(dexscreener.start(process_token)),
+        asyncio.create_task(pumpfun.start(process_token)),
         asyncio.create_task(performance_tracker.start()),
         asyncio.create_task(momentum_analyzer.start()),
         asyncio.create_task(outcome_tracker.start()),
