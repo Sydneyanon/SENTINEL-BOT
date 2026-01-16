@@ -1,11 +1,10 @@
 """
 Telegram Publisher - Posts signals to Telegram channel
 """
-
 import os
 import asyncio
-from telegram import Bot
-from telegram.constants import ParseMode
+from aiogram import Bot
+from aiogram.enums import ParseMode
 from loguru import logger
 from dotenv import load_dotenv
 
@@ -13,7 +12,6 @@ load_dotenv()
 
 TELEGRAM_BOT_TOKEN = os.getenv('TELEGRAM_BOT_TOKEN')
 TELEGRAM_CHANNEL_ID = os.getenv('TELEGRAM_CHANNEL_ID')
-
 
 class TelegramPublisher:
     """Handles posting signals to Telegram channel"""
@@ -75,7 +73,6 @@ class TelegramPublisher:
         # Build message
         message = f"""
 **NEW SIGNAL**
-
 Token: ${symbol}
 Conviction: {conviction}/100
 
@@ -93,7 +90,7 @@ Liquidity: ${liquidity:,.0f}
             message += f"• {reason}\n"
         
         # Add links
-        message += f"\n[View on DexScreener](https://dexscreener.com/solana/{address})"
-        message += f"\n`{address}`"
+        message += f"\n[View on DexScreener](https://dexscreener.com/solana/{address})\n"
+        message += f"`{address}`"
         
         return message.strip()
