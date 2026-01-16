@@ -1,284 +1,183 @@
 """
-Database class for Sentinel Signals
-Handles all database operations
+Sentinel Signals - Solana Memecoin Signal Bot
+Main entry point
 """
 
-import aiosqlite
-from datetime import datetime, timedelta
-from typing import List, Dict, Optional
-from loguru import logger
-
-
+import asyncio
 import os
+from loguru import logger
+from dotenv import load_dotenv
 
-class Database:
-    """SQLite database handler"""
-    def __init__(self):
-        self.db_path = os.getenv("DATABASE_PATH", "/app/data/signals.db")  # ← Safe default for Railway
-        self.conn = None
-        
-    async def initialize(self):
-        """Initialize database and create tables"""
-        self.conn = await aiosqlite.connect(self.db_path)
-        
-        # Create signals table with complete schema
-        await self.conn.execute('''
-            CREATE TABLE IF NOT EXISTS signals (
-                address TEXT PRIMARY KEY,
-                symbol TEXT,
-                name TEXT,
-                initial_price REAL,
-                conviction_score INTEGER,
-                posted INTEGER DEFAULT 0,
-                posted_at TIMESTAMP,
-                posted_milestones TEXT DEFAULT '',
-                last_sell_signal TEXT,
-                last_sell_signal_at TIMESTAMP,
-                outcome TEXT DEFAULT 'pending',
-                outcome_price REAL,
-                outcome_gain REAL,
-                peak_price REAL,
-                peak_gain REAL,
-                evaluated_at TIMESTAMP,
-                outcome_reason TEXT
-            )
-        ''')
-        
-        # Create indexes for performance
-        await self.conn.execute('CREATE INDEX IF NOT EXISTS idx_outcome ON signals(outcome)')
-        await self.conn.execute('CREATE INDEX IF NOT EXISTS idx_posted_at ON signals(posted_at)')
-        await self.conn.execute('CREATE INDEX IF NOT EXISTS idx_evaluated_at ON signals(evaluated_at)')
-        
-        await self.conn.commit()
-        logger.info("✓ Database initialized")
+from database import Database
+from dexscreener_monitor import DexScreenerMonitor
+from telegram_publisher import TelegramPublisher
+from performance_tracker import PerformanceTracker
+from momentum_analyzer import MomentumAnalyzer
+from outcome_tracker import OutcomeTracker
+from telegram_admin_bot import TelegramAdminBot
+from health import start_health_server
+
+load_dotenv()
+
+# Configuration
+MIN_CONVICTION_SCORE = int(os.getenv('MIN_CONVICTION_SCORE', 80))
+
+# Configure logger
+logger.add("sentinel.log", rotation="1 day", retention="7 days", level="INFO")
+
+
+from typing import Tuple, List
+
+def calculate_conviction_score(token_data: dict) -> Tuple[int, List[str]]:
+    """
+    Calculate conviction score for a token
+    Returns: (score, reasons)
+    """
+    score = 0
+    reasons = []
     
-    async def close(self):
-        """Close database connection"""
-        if self.conn:
-            await self.conn.close()
+    liquidity = token_data.get('liquidity_usd', 0)
+    volume_24h = token_data.get('volume_24h', 0)
+    price_change_24h = token_data.get('price_change_24h', 0)
+    txns_buys = token_data.get('txns_24h_buys', 0)
+    txns_sells = token_data.get('txns_24h_sells', 0)
     
-    # ========================================================================
-    # GENERAL METHODS
-    # ========================================================================
+    # Liquidity scoring
+    if 10000 <= liquidity <= 50000:
+        score += 20
+        reasons.append(f"Optimal liquidity ${liquidity:,.0f}")
+    elif liquidity > 50000:
+        score += 10
+        reasons.append(f"High liquidity ${liquidity:,.0f}")
     
-    async def has_seen(self, address: str) -> bool:
-        """Check if we've already seen this token"""
-        query = "SELECT 1 FROM signals WHERE address = ?"
+    # Volume scoring
+    if volume_24h > 50000:
+        score += 15
+        reasons.append(f"Strong volume ${volume_24h:,.0f}")
+    elif volume_24h > 20000:
+        score += 10
+        reasons.append(f"Good volume ${volume_24h:,.0f}")
+    
+    # Price action scoring
+    if price_change_24h > 200:
+        score += 25
+        reasons.append(f"+{price_change_24h:.0f}% MOONING")
+    elif price_change_24h > 100:
+        score += 20
+        reasons.append(f"+{price_change_24h:.0f}% surging")
+    elif price_change_24h > 50:
+        score += 12
+        reasons.append(f"+{price_change_24h:.0f}% rising")
+    
+    # Buy pressure scoring
+    if txns_buys > 0 and txns_sells > 0:
+        ratio = txns_buys / max(txns_sells, 1)
+        total_txns = txns_buys + txns_sells
         
-        async with self.conn.execute(query, (address,)) as cursor:
-            row = await cursor.fetchone()
-        
-        return row is not None
+        if ratio > 2 and total_txns > 100:
+            score += 15
+            reasons.append(f"Buy pressure {txns_buys}B/{txns_sells}S")
+        elif ratio > 1.5 and total_txns > 50:
+            score += 8
+            reasons.append(f"Positive ratio {ratio:.1f}")
     
-    async def save_signal(self, token_data: dict, posted: bool = False):
-        """Save a signal to database"""
-        query = """
-            INSERT OR REPLACE INTO signals 
-            (address, symbol, name, initial_price, conviction_score, posted, posted_at, 
-             posted_milestones, outcome)
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
-        """
-        
-        posted_at = datetime.now().isoformat() if posted else None
-        initial_price = token_data.get('priceUsd', 0) if posted else 0
-        
-        await self.conn.execute(
-            query,
-            (
-                token_data['address'],
-                token_data.get('symbol', 'UNKNOWN'),
-                token_data.get('name', 'Unknown Token'),
-                initial_price,
-                token_data.get('conviction_score', 0),
-                1 if posted else 0,
-                posted_at,
-                '',
-                'pending'
-            )
-        )
-        await self.conn.commit()
+    return min(score, 100), reasons
+
+
+async def main():
+    """Main bot entry point"""
     
-    # ========================================================================
-    # PERFORMANCE TRACKING METHODS
-    # ========================================================================
+    logger.info("=" * 60)
+    logger.info("SENTINEL SIGNALS - Starting up...")
+    logger.info("=" * 60)
     
-    async def get_active_signals(self) -> List[Dict]:
-        """Get signals that haven't hit 1000x yet"""
-        query = """
-            SELECT address, symbol, name, initial_price, posted_milestones, posted_at
-            FROM signals
-            WHERE posted = 1
-            AND initial_price > 0
-            AND (posted_milestones NOT LIKE '%1000%' OR posted_milestones IS NULL OR posted_milestones = '')
-            ORDER BY posted_at DESC
-            LIMIT 100
-        """
-        
-        async with self.conn.execute(query) as cursor:
-            rows = await cursor.fetchall()
-        
-        return [
-            {
-                'address': row[0],
-                'symbol': row[1],
-                'name': row[2],
-                'initial_price': row[3],
-                'posted_milestones': row[4] or '',
-                'posted_at': row[5]
-            }
-            for row in rows
-        ]
+    # Initialize database
+    db = Database()
+    await db.initialize()
+    logger.info("✓ Database ready")
     
-    async def update_posted_milestones(self, address: str, posted_milestones: str):
-        """Update which milestones have been posted"""
-        query = "UPDATE signals SET posted_milestones = ? WHERE address = ?"
-        await self.conn.execute(query, (posted_milestones, address))
-        await self.conn.commit()
+    # Initialize Telegram publisher
+    telegram = TelegramPublisher()
+    logger.info("✓ Telegram publisher ready")
     
-    # ========================================================================
-    # MOMENTUM ANALYZER METHODS
-    # ========================================================================
+    # Initialize DexScreener monitor
+    dexscreener = DexScreenerMonitor()
+    logger.info("✓ DexScreener monitor ready")
     
-    async def mark_sell_signal_sent(self, address: str, signal_type: str):
-        """Mark that a sell signal has been sent"""
-        query = "UPDATE signals SET last_sell_signal = ?, last_sell_signal_at = ? WHERE address = ?"
-        await self.conn.execute(query, (signal_type, datetime.now().isoformat(), address))
-        await self.conn.commit()
+    # Initialize performance tracker
+    performance_tracker = PerformanceTracker(db, telegram)
+    logger.info("✓ Performance tracker ready")
     
-    async def get_sell_signal_history(self, address: str) -> Optional[Dict]:
-        """Get the last sell signal sent for a token"""
-        query = "SELECT last_sell_signal, last_sell_signal_at FROM signals WHERE address = ?"
-        
-        async with self.conn.execute(query, (address,)) as cursor:
-            row = await cursor.fetchone()
-        
-        if row and row[0]:
-            return {'signal_type': row[0], 'sent_at': row[1]}
-        return None
+    # Initialize momentum analyzer
+    momentum_analyzer = MomentumAnalyzer(db, telegram)
+    logger.info("✓ Momentum analyzer ready")
     
-    # ========================================================================
-    # OUTCOME TRACKING METHODS
-    # ========================================================================
+    # Initialize outcome tracker
+    outcome_tracker = OutcomeTracker(db)
+    logger.info("✓ Outcome tracker ready")
     
-    async def get_pending_outcomes(self) -> List[Dict]:
-        """Get signals that don't have an outcome yet"""
-        query = """
-            SELECT address, symbol, initial_price, posted_at
-            FROM signals
-            WHERE posted = 1
-            AND (outcome IS NULL OR outcome = 'pending')
-            AND posted_at IS NOT NULL
-            ORDER BY posted_at DESC
-        """
-        
-        async with self.conn.execute(query) as cursor:
-            rows = await cursor.fetchall()
-        
-        return [
-            {
-                'address': row[0],
-                'symbol': row[1],
-                'initial_price': row[2],
-                'posted_at': row[3]
-            }
-            for row in rows
-        ]
+    # Initialize admin bot
+    admin_bot = TelegramAdminBot(db, outcome_tracker)
+    logger.info("✓ Admin bot ready")
     
-    async def save_outcome(self, address: str, outcome: str, outcome_price: float,
-                          outcome_gain: float, peak_gain: float, 
-                          evaluated_at: str, reason: str):
-        """Save the outcome of a signal"""
-        query = """
-            UPDATE signals
-            SET outcome = ?,
-                outcome_price = ?,
-                outcome_gain = ?,
-                peak_gain = ?,
-                evaluated_at = ?,
-                outcome_reason = ?
-            WHERE address = ?
-        """
-        
-        await self.conn.execute(
-            query, 
-            (outcome, outcome_price, outcome_gain, peak_gain, evaluated_at, reason, address)
-        )
-        await self.conn.commit()
-    
-    async def get_peak_price(self, address: str) -> Optional[float]:
-        """Get the peak price reached for a signal"""
-        query = "SELECT peak_price FROM signals WHERE address = ?"
-        
-        async with self.conn.execute(query, (address,)) as cursor:
-            row = await cursor.fetchone()
-        
-        return row[0] if row and row[0] else None
-    
-    async def update_peak_price(self, address: str, peak_price: float):
-        """Update peak price if higher than current"""
-        query = """
-            UPDATE signals
-            SET peak_price = ?
-            WHERE address = ?
-            AND (peak_price IS NULL OR peak_price < ?)
-        """
-        
-        await self.conn.execute(query, (peak_price, address, peak_price))
-        await self.conn.commit()
-    
-    async def get_outcomes(self, days: Optional[int] = None) -> List[Dict]:
-        """Get all evaluated outcomes, optionally filtered by days"""
-        if days:
-            cutoff = (datetime.now() - timedelta(days=days)).isoformat()
-            query = """
-                SELECT address, symbol, outcome, outcome_gain, peak_gain, 
-                       initial_price, outcome_price, evaluated_at, outcome_reason
-                FROM signals
-                WHERE outcome IS NOT NULL
-                AND outcome != 'pending'
-                AND posted_at >= ?
-                ORDER BY evaluated_at DESC
-            """
+    # Define token processing callback
+    async def process_token(token_data: dict):
+        """Process new token from DexScreener"""
+        try:
+            # Check if already seen
+            if await db.has_seen(token_data['address']):
+                return
             
-            async with self.conn.execute(query, (cutoff,)) as cursor:
-                rows = await cursor.fetchall()
-        else:
-            query = """
-                SELECT address, symbol, outcome, outcome_gain, peak_gain,
-                       initial_price, outcome_price, evaluated_at, outcome_reason
-                FROM signals
-                WHERE outcome IS NOT NULL
-                AND outcome != 'pending'
-                ORDER BY evaluated_at DESC
-            """
+            # Calculate conviction score
+            score, reasons = calculate_conviction_score(token_data)
+            token_data['conviction_score'] = score
+            token_data['conviction_reasons'] = reasons
             
-            async with self.conn.execute(query) as cursor:
-                rows = await cursor.fetchall()
+            logger.info(f"Token {token_data.get('symbol', 'UNKNOWN')}: {score} conviction")
+            
+            # Post if meets threshold
+            if score >= MIN_CONVICTION_SCORE:
+                await telegram.post_signal(token_data)
+                await db.save_signal(token_data, posted=True)
+                logger.info(f"✓ Posted {token_data.get('symbol')} to channel")
+            else:
+                # Mark as seen but not posted
+                await db.save_signal(token_data, posted=False)
         
-        return [
-            {
-                'address': row[0],
-                'symbol': row[1],
-                'outcome': row[2],
-                'outcome_gain': row[3],
-                'peak_gain': row[4],
-                'initial_price': row[5],
-                'outcome_price': row[6],
-                'evaluated_at': row[7],
-                'outcome_reason': row[8]
-            }
-            for row in rows
-        ]
+        except Exception as e:
+            logger.error(f"Error processing token: {e}", exc_info=True)
     
-    async def count_pending_outcomes(self) -> int:
-        """Count signals still pending outcome"""
-        query = """
-            SELECT COUNT(*) FROM signals
-            WHERE posted = 1
-            AND (outcome IS NULL OR outcome = 'pending')
-        """
-        
-        async with self.conn.execute(query) as cursor:
-            row = await cursor.fetchone()
-        
-        return row[0] if row else 0
+    # Start all tasks
+    tasks = [
+        asyncio.create_task(start_health_server()),  # Health check for Railway
+        asyncio.create_task(dexscreener.start(process_token)),
+        asyncio.create_task(performance_tracker.start()),
+        asyncio.create_task(momentum_analyzer.start()),
+        asyncio.create_task(outcome_tracker.start()),
+        asyncio.create_task(admin_bot.start()),
+    ]
+    
+    logger.info("=" * 60)
+    logger.info("🚀 ALL SYSTEMS OPERATIONAL")
+    logger.info("=" * 60)
+    logger.info("📱 Send /help to your admin bot for commands")
+    logger.info("🔍 Monitoring DexScreener for new tokens...")
+    
+    try:
+        await asyncio.gather(*tasks)
+    except KeyboardInterrupt:
+        logger.info("⏸️  Shutdown signal received...")
+    except Exception as e:
+        logger.error(f"Fatal error: {e}", exc_info=True)
+    finally:
+        logger.info("Stopping all services...")
+        await performance_tracker.stop()
+        await momentum_analyzer.stop()
+        await outcome_tracker.stop()
+        await admin_bot.stop()
+        await db.close()
+        logger.info("✓ Shutdown complete")
+
+
+if __name__ == "__main__":
+    asyncio.run(main())
