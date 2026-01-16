@@ -1,0 +1,36 @@
+git add Procfile
+   git commit -m "Add Procfile for Railway"
+   git push
+```
+4. **Railway will automatically redeploy** with the correct start command
+
+---
+
+## 📋 **Your Complete File List for GitHub:**
+```
+your-repo/
+├── main.py
+├── database.py
+├── dexscreener_monitor.py
+├── telegram_publisher.py
+├── performance_tracker.py
+├── momentum_analyzer.py
+├── outcome_tracker.py
+├── telegram_admin_bot.py
+├── requirements.txt
+├── .env.example
+├── .gitignore
+├── Procfile          ← ADD THIS!
+├── railway.json      ← ADD THIS TOO (optional backup)
+└── README.md
+```
+
+---
+
+After you add the `Procfile` and push it, Railway should start successfully and you'll see:
+```
+✓ Database ready
+✓ Telegram publisher ready
+✓ DexScreener monitor ready
+...
+🚀 ALL SYSTEMS OPERATIONAL
