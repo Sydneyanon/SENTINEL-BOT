@@ -33,6 +33,6 @@ Base Score: 70
 - Bullish ratio (150 buys / 80 sells) (+15)
 
 KOL Boost: +15
-- 👀 2 KOLs bought: CENTED, BRADJAE (+15)
+- 2 KOLs bought: CENTED, BRADJAE (+15)
 
 TOTAL: 85/100 ✅ POSTED
