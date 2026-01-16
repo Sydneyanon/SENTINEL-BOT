@@ -102,7 +102,6 @@ async def main():
         
         # Initialize Telegram publisher
         publisher = TelegramPublisher()
-        await publisher.start()
         logger.info("✓ Telegram publisher ready")
         
         # Initialize conviction filter
