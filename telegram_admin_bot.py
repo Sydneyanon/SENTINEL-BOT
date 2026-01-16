@@ -290,7 +290,6 @@ Pending: {stats['pending']} ⏳
         message += "\n\n💡 Win = +100% in 24h | Loss = -50% or timeout"
         
         return message
-```
 
 ---
 
