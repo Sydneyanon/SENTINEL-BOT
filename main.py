@@ -1,4 +1,4 @@
-"""
+      """
 Sentinel Signals - Main Bot Entry Point
 Monitors pump.fun graduations + Helius webhooks + KOL wallets
 """
@@ -154,46 +154,86 @@ async def main():
                 
                 logger.info(f"🔍 Processing token: {token_mint}")
                 
-                # Get conviction score
-                conviction_data = await conviction_filter.evaluate_token(token_mint)
-                
-                if not conviction_data:
-                    logger.info(f"❌ No DEX data for {token_mint}")
-                    return
-                
-                # Check KOL involvement
-                kol_boost = kol_tracker.get_kol_boost(token_mint)
-                final_score = conviction_data['score'] + kol_boost
-                
-                if kol_boost > 0:
-                    logger.info(f"🎯 KOL boost: +{kol_boost} (final: {final_score})")
-                
-                # Check if meets threshold
-                if final_score < MIN_CONVICTION_SCORE:
-                    logger.info(f"📉 {conviction_data['symbol']} scored {final_score} (below {MIN_CONVICTION_SCORE})")
-                    return
-                
-                # Post signal
-                logger.info(f"🚀 {conviction_data['symbol']} scored {final_score}!")
-                message_id = await publisher.post_signal(conviction_data, final_score, kol_boost)
-                
-                # Track in database
-                if message_id:
-                    await db.add_signal(
-                        token_mint,
-                        conviction_data['symbol'],
-                        conviction_data.get('name', ''),
-                        final_score,
-                        conviction_data['price'],
-                        conviction_data['liquidity_usd'],
-                        conviction_data['volume_24h'],
-                        conviction_data['pair_address'],
-                        message_id
-                    )
-                    
-                    # Start tracking
-                    await performance_tracker.track_token(token_mint)
-                    logger.info(f"✅ Tracking started for {conviction_data['symbol']}")
+                # Fetch token data from DexScreener
+                import aiohttp
+                async with aiohttp.ClientSession() as session:
+                    url = f"https://api.dexscreener.com/latest/dex/tokens/{token_mint}"
+                    async with session.get(url) as resp:
+                        if resp.status != 200:
+                            logger.warning(f"DexScreener returned {resp.status} for {token_mint}")
+                            return
+                        
+                        data = await resp.json()
+                        pairs = data.get('pairs', [])
+                        
+                        if not pairs:
+                            logger.info(f"❌ No DEX data for {token_mint}")
+                            return
+                        
+                        # Get the main pair (usually first one, highest liquidity)
+                        pair = pairs[0]
+                        
+                        # Build token data for conviction scoring
+                        token_data = {
+                            'liquidity_usd': float(pair.get('liquidity', {}).get('usd', 0)),
+                            'volume_24h': float(pair.get('volume', {}).get('h24', 0)),
+                            'price_change_24h': float(pair.get('priceChange', {}).get('h24', 0)),
+                            'txns_24h_buys': int(pair.get('txns', {}).get('h24', {}).get('buys', 0)),
+                            'txns_24h_sells': int(pair.get('txns', {}).get('h24', {}).get('sells', 0)),
+                            'market_cap': float(pair.get('marketCap', 0)),
+                            'signal_type': 'graduated'
+                        }
+                        
+                        # Calculate conviction score
+                        score, reasons = conviction_filter.calculate_conviction_score(token_data)
+                        
+                        # Check KOL involvement
+                        kol_boost = kol_tracker.get_kol_boost(token_mint)
+                        final_score = score + kol_boost
+                        
+                        if kol_boost > 0:
+                            logger.info(f"🎯 KOL boost: +{kol_boost} (final: {final_score})")
+                        
+                        # Check if meets threshold
+                        if final_score < MIN_CONVICTION_SCORE:
+                            logger.info(f"📉 {pair.get('baseToken', {}).get('symbol', 'UNKNOWN')} scored {final_score:.0f} (below {MIN_CONVICTION_SCORE})")
+                            return
+                        
+                        # Build conviction data for posting
+                        conviction_data = {
+                            'symbol': pair.get('baseToken', {}).get('symbol', 'UNKNOWN'),
+                            'name': pair.get('baseToken', {}).get('name', ''),
+                            'score': score,
+                            'reasons': reasons,
+                            'price': float(pair.get('priceUsd', 0)),
+                            'liquidity_usd': token_data['liquidity_usd'],
+                            'volume_24h': token_data['volume_24h'],
+                            'price_change_24h': token_data['price_change_24h'],
+                            'pair_address': pair.get('pairAddress', ''),
+                            'dex_url': pair.get('url', '')
+                        }
+                        
+                        # Post signal
+                        logger.info(f"🚀 {conviction_data['symbol']} scored {final_score:.0f}!")
+                        message_id = await publisher.post_signal(conviction_data, final_score, kol_boost)
+                        
+                        # Track in database
+                        if message_id:
+                            await db.add_signal(
+                                token_mint,
+                                conviction_data['symbol'],
+                                conviction_data.get('name', ''),
+                                final_score,
+                                conviction_data['price'],
+                                conviction_data['liquidity_usd'],
+                                conviction_data['volume_24h'],
+                                conviction_data['pair_address'],
+                                message_id
+                            )
+                            
+                            # Start tracking
+                            await performance_tracker.track_token(token_mint)
+                            logger.info(f"✅ Tracking started for {conviction_data['symbol']}")
                     
             except Exception as e:
                 logger.error(f"Error processing {token_mint}: {e}", exc_info=True)
