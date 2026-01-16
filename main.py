@@ -9,7 +9,7 @@ from loguru import logger
 from dotenv import load_dotenv
 
 from database import Database
-from dexscreener_monitor import DexScreenerMonitor
+from pumpfun_monitor import PumpfunMonitor
 from telegram_publisher import TelegramPublisher
 from performance_tracker import PerformanceTracker
 from momentum_analyzer import MomentumAnalyzer
