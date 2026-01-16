@@ -27,10 +27,10 @@ railway logs -f
 ```
 Token: $PEPE
 Base Score: 70
-- 💧 Excellent liquidity ($52,000) (+25)
-- 📊 Strong volume ($78,000) (+15)
-- 🚀 Strong pump (+65.2%) (+15)
-- 🔥 Bullish ratio (150 buys / 80 sells) (+15)
+- Excellent liquidity ($52,000) (+25)
+- Strong volume ($78,000) (+15)
+- Strong pump (+65.2%) (+15)
+- Bullish ratio (150 buys / 80 sells) (+15)
 
 KOL Boost: +15
 - 👀 2 KOLs bought: CENTED, BRADJAE (+15)
