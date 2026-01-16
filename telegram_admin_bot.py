@@ -290,13 +290,3 @@ Pending: {stats['pending']} ⏳
         message += "\n\n💡 Win = +100% in 24h | Loss = -50% or timeout"
         
         return message
-
-
-
-## **File: requirements.txt**
-
-aiohttp 3.9.1
-aiosqlite 0.19.0
-python-dotenv 1.0.0
-loguru 0.7.2
-python-telegram-bot 20.7
