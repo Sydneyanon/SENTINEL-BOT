@@ -101,7 +101,7 @@ async def main():
         logger.info("✓ Database ready")
         
         # Initialize Telegram publisher
-        publisher = TelegramPublisher(TELEGRAM_BOT_TOKEN, TELEGRAM_CHANNEL_ID)
+        publisher = TelegramPublisher()
         await publisher.start()
         logger.info("✓ Telegram publisher ready")
         
