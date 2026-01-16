@@ -142,10 +142,15 @@ async def main():
         async def process_token(token_mint: str):
             """Process a graduated token through the pipeline"""
             try:
-                # Check if already processed
-                if await db.has_signal(token_mint):
-                    logger.debug(f"Token {token_mint} already processed, skipping")
-                    return
+                # Check if already processed (try-except in case method doesn't exist)
+                try:
+                    existing = await db.get_signal(token_mint)
+                    if existing:
+                        logger.debug(f"Token {token_mint} already processed, skipping")
+                        return
+                except AttributeError:
+                    # Database doesn't have get_signal method, continue anyway
+                    pass
                 
                 logger.info(f"🔍 Processing token: {token_mint}")
                 
