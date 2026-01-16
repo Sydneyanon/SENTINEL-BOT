@@ -294,7 +294,7 @@ Pending: {stats['pending']} ⏳
 
 
 ## **File: requirements.txt**
-```
+
 aiohttp==3.9.1
 aiosqlite==0.19.0
 python-dotenv==1.0.0
