@@ -1,4 +1,4 @@
-   """
+"""
 KOL Wallet Tracker - Monitor known influencer wallets via Helius
 """
 
