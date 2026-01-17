@@ -36,8 +36,11 @@ MIN_CONVICTION_SCORE = float(os.getenv("MIN_CONVICTION_SCORE", 70))
 # Global shutdown flag
 shutdown_event = asyncio.Event()
 
-# Global graduation monitor for webhook access
+# Global references
 graduation_monitor = None
+db = None
+publisher = None
+kol_tracker = None
 
 def signal_handler(signum, frame):
     logger.info(f"Received signal {signum}, initiating shutdown...")
@@ -82,8 +85,27 @@ async def health_check_server():
     logger.info(f"✓ Webhook endpoint: POST /webhook/graduation")
 
 
+async def post_kol_followup(token_mint: str, symbol: str, kol_boost: float, kol_reasons: list):
+    """Post a follow-up when additional KOLs buy an already-called token"""
+    try:
+        message = f"""🎯 **KOL ALERT: ${symbol}**
+
+{chr(10).join(kol_reasons)}
+
+Score boost: +{kol_boost:.0f}
+
+[View Chart](https://dexscreener.com/solana/{token_mint})
+""".strip()
+        
+        await publisher.send_message(message)
+        logger.info(f"✓ Posted KOL follow-up for {symbol} (+{kol_boost})")
+    
+    except Exception as e:
+        logger.error(f"Error posting KOL follow-up: {e}", exc_info=True)
+
+
 async def main():
-    global graduation_monitor
+    global graduation_monitor, db, publisher, kol_tracker
     
     logger.info("=" * 60)
     logger.info("SENTINEL SIGNALS - Starting up...")
@@ -107,6 +129,17 @@ async def main():
         logger.info("✓ Helius graduation monitor ready (Webhook)")
         
         kol_tracker = KOLWalletTracker()
+        
+        # Set callback for when KOLs buy already-called tokens
+        async def on_kol_buy_existing(token_mint: str, kol_name: str, kol_count: int):
+            """Called when a KOL buys a token we already posted"""
+            signal = await db.get_signal(token_mint)
+            if signal and signal['posted']:
+                symbol = signal['symbol']
+                kol_boost, kol_reasons = kol_tracker.get_kol_buy_boost(token_mint)
+                await post_kol_followup(token_mint, symbol, kol_boost, kol_reasons)
+        
+        kol_tracker.set_existing_token_callback(on_kol_buy_existing)
         logger.info("✓ KOL wallet tracker ready")
         
         performance_tracker = PerformanceTracker(db, publisher)
@@ -196,7 +229,7 @@ async def main():
                             "dex_url": pair.get("url", "")
                         }
                         
-                        logger.info(f"🚀 {conviction_data["symbol"]} scored {final_score:.0f}!")
+                        logger.info(f"🚀 {conviction_data['symbol']} scored {final_score:.0f}!")
                         message_id = await publisher.post_signal(conviction_data)
                         
                         if message_id:
@@ -205,7 +238,7 @@ async def main():
                                 conviction_data["symbol"],
                                 conviction_data.get("name", ""),
                                 final_score,
-                                conviction_data["priceUsd"],
+                                conviction_data["priceUsd"],  # ✅ FIXED: was "price"
                                 conviction_data["liquidity_usd"],
                                 conviction_data["volume_24h"],
                                 conviction_data["pair_address"],
@@ -213,7 +246,7 @@ async def main():
                             )
                             
                             await performance_tracker.track_token(token_mint)
-                            logger.info(f"✅ Tracking started for {conviction_data["symbol"]}")
+                            logger.info(f"✅ Tracking started for {conviction_data['symbol']}")
                     
             except Exception as e:
                 logger.error(f"Error processing {token_mint}: {e}", exc_info=True)
