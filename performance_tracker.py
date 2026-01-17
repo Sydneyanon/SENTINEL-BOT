@@ -53,6 +53,7 @@ class PerformanceTracker:
         
         logger.info(f"📊 Performance tracker started (checks every {PERFORMANCE_CHECK_INTERVAL_SEC}s)")
         logger.info("📊 Event-driven updates: holders, volume, liquidity, price changes")
+        logger.info("🏆 Instant WIN confirmation on 2x milestone")
         
         while self.running:
             try:
@@ -103,7 +104,7 @@ class PerformanceTracker:
         if not current_metrics:
             return
         
-        # Check for milestone achievements
+        # Check for milestone achievements (includes instant WIN on 2x)
         await self._check_milestones(signal, current_metrics)
         
         # Check for significant metric changes (event-driven)
@@ -182,7 +183,7 @@ class PerformanceTracker:
             return None
     
     async def _check_milestones(self, signal: Dict, current_metrics: Dict):
-        """Check for milestone achievements"""
+        """Check for milestone achievements and IMMEDIATELY mark 2x as WIN"""
         address = signal['address']
         initial_price = signal['initial_price']
         symbol = signal.get('symbol', 'UNKNOWN')
@@ -193,8 +194,9 @@ class PerformanceTracker:
         if not current_price or not initial_price:
             return
         
-        # Calculate multiplier
+        # Calculate multiplier and gain percentage
         multiplier = current_price / initial_price
+        gain_pct = (multiplier - 1) * 100
         
         # Check which milestones have been hit
         posted_list = posted_milestones.split(',') if posted_milestones else []
@@ -210,6 +212,20 @@ class PerformanceTracker:
                     current_price=current_price,
                     multiplier=multiplier
                 )
+                
+                # 🏆 IMMEDIATE WIN CONFIRMATION when hitting 2x
+                if milestone == 2:
+                    # Mark as WIN in database immediately
+                    await self.db.save_outcome(
+                        address=address,
+                        outcome='win',
+                        outcome_price=current_price,
+                        outcome_gain=gain_pct,
+                        peak_gain=gain_pct,  # At 2x, this is the peak so far
+                        evaluated_at=datetime.now().isoformat(),
+                        reason='Hit 2x target'
+                    )
+                    logger.success(f"🏆 {symbol} CONFIRMED WIN at 2x ({gain_pct:.1f}%)")
                 
                 # Update database
                 posted_set.add(milestone)
@@ -363,10 +379,24 @@ Price: ${current_metrics['price']:.10f}
                 emoji = "🔥"
             elif milestone >= 5:
                 emoji = "🚀"
+            elif milestone == 2:
+                emoji = "🏆"  # Special for WIN confirmation
             else:
                 emoji = "📈"
             
-            message = f"""**{emoji} ${symbol} HIT {milestone}X!**
+            # Special message for 2x WIN
+            if milestone == 2:
+                message = f"""**{emoji} ${symbol} HIT 2X - WIN CONFIRMED!**
+
+Multiplier: {multiplier:.2f}x
+Current Price: ${current_price:.10f}
+
+🏆 This signal is now marked as a WIN
+
+[View Chart](https://dexscreener.com/solana/{address})
+""".strip()
+            else:
+                message = f"""**{emoji} ${symbol} HIT {milestone}X!**
 
 Multiplier: {multiplier:.2f}x
 Current Price: ${current_price:.10f}
