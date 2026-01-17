@@ -69,6 +69,29 @@ class Database:
         
         return row is not None
     
+    async def get_signal(self, address: str) -> Optional[Dict]:
+        """Get a signal by address"""
+        query = """
+            SELECT address, symbol, name, initial_price, conviction_score, posted, posted_at
+            FROM signals
+            WHERE address = ?
+        """
+        
+        async with self.conn.execute(query, (address,)) as cursor:
+            row = await cursor.fetchone()
+        
+        if row:
+            return {
+                'address': row[0],
+                'symbol': row[1],
+                'name': row[2],
+                'initial_price': row[3],
+                'conviction_score': row[4],
+                'posted': row[5],
+                'posted_at': row[6]
+            }
+        return None
+    
     async def save_signal(self, token_data: dict, posted: bool = False):
         """Save a signal to database"""
         query = """
@@ -96,6 +119,43 @@ class Database:
             )
         )
         await self.conn.commit()
+    
+    async def add_signal(
+        self,
+        address: str,
+        symbol: str,
+        name: str,
+        conviction_score: float,
+        initial_price: float,
+        liquidity_usd: float,
+        volume_24h: float,
+        pair_address: str,
+        message_id: int
+    ):
+        """Add a signal to database (called when signal is posted)"""
+        query = """
+            INSERT OR REPLACE INTO signals 
+            (address, symbol, name, initial_price, conviction_score, posted, posted_at, 
+             posted_milestones, outcome)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+        """
+        
+        await self.conn.execute(
+            query,
+            (
+                address,
+                symbol,
+                name,
+                initial_price,
+                int(conviction_score),
+                1,  # posted = true
+                datetime.now().isoformat(),
+                '',  # no milestones yet
+                'pending'
+            )
+        )
+        await self.conn.commit()
+        logger.info(f"✓ Saved signal to database: {symbol} ({address[:8]}...)")
     
     # ========================================================================
     # PERFORMANCE TRACKING METHODS
