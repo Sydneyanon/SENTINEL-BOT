@@ -185,9 +185,10 @@ async def main():
                         conviction_data = {
                             "symbol": pair.get("baseToken", {}).get("symbol", "UNKNOWN"),
                             "name": pair.get("baseToken", {}).get("name", ""),
-                            "score": final_score,
-                            "reasons": reasons,
-                            "price": float(pair.get("priceUsd", 0)),
+                            "address": token_mint,
+                            "conviction_score": final_score,
+                            "conviction_reasons": reasons,
+                            "priceUsd": float(pair.get("priceUsd", 0)),
                             "liquidity_usd": token_data["liquidity_usd"],
                             "volume_24h": token_data["volume_24h"],
                             "price_change_24h": token_data["price_change_24h"],
