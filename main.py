@@ -169,16 +169,16 @@ async def main():
                 if token_mint in processing_tokens:
                     logger.debug(f"Token {token_mint} already being processed, skipping")
                     return
-                processing_tokens.add(token_mint)
-            
-            try:
-                # Check if already in database
+                
+                # Check database INSIDE the lock to prevent race condition
                 existing = await db.get_signal(token_mint)
                 if existing:
-                    processing_tokens.discard(token_mint)
                     logger.debug(f"Token {token_mint} already in database, skipping")
                     return
                 
+                processing_tokens.add(token_mint)
+            
+            try:
                 logger.info(f"🔍 Processing token: {token_mint}")
                 
                 import aiohttp
