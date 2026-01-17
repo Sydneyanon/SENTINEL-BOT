@@ -1,8 +1,6 @@
 """
-KOL Wallet Tracker - Monitor known influencer wallets via Helius
+KOL Wallet Tracker - Webhook-based monitoring (no polling!)
 """
-import asyncio
-import aiohttp
 import os
 from typing import Set, Dict, List, Optional, Tuple
 from datetime import datetime, timedelta
@@ -11,10 +9,7 @@ from dotenv import load_dotenv
 
 load_dotenv()
 
-HELIUS_API_KEY = os.getenv('HELIUS_API_KEY', '')
-HELIUS_RPC = f"https://mainnet.helius-rpc.com/?api-key={HELIUS_API_KEY}"
-POLL_INTERVAL = int(os.getenv('KOL_WALLET_POLL_INTERVAL', 30))  # Check every 30s
-BUY_EXPIRY_HOURS = int(os.getenv('KOL_BUY_EXPIRY_HOURS', 24))  # Buys are relevant for 24h
+BUY_EXPIRY_HOURS = int(os.getenv('KOL_BUY_EXPIRY_HOURS', 24))
 
 # Top 10 KOL wallets from 7-day leaderboard
 DEFAULT_KOL_WALLETS = {
@@ -30,271 +25,179 @@ DEFAULT_KOL_WALLETS = {
     '57rXqaQsvgyBKwebP2StfqQeCBjBS4jsrZFJN5aU2V9b': {'name': 'Ram', 'tier': 'top'},
 }
 
-# Additional wallets from env var (comma-separated)
-TRACKED_WALLETS = os.getenv('TRACKED_KOL_WALLETS', '').split(',')
-
 # Raydium and Jupiter program IDs for swap detection
 RAYDIUM_PROGRAMS = {
-    '675kPX9MHTjS2zt1qfr1NYHuzeLXfQM9H24wFSUt1Mp8',  # Raydium AMM
-    'CAMMCzo5YL8w4VFF8KVHrK22GGUsp5VTaW7grrKgrWqK',  # Raydium CLMM
+    '675kPX9MHTjS2zt1qfr1NYHuzeLXfQM9H24wFSUt1Mp8',
+    'CAMMCzo5YL8w4VFF8KVHrK22GGUsp5VTaW7grrKgrWqK',
 }
 JUPITER_PROGRAM = 'JUP6LkbZbjS1jKKwapdHNy74zcZ3tLUZoi5QNyVTaV4'
 
 
 class KOLWalletTracker:
-    """Tracks wallet activity of known successful traders via Helius"""
+    """Webhook-based KOL wallet tracker - receives push notifications from Helius"""
     
     def __init__(self):
-        self.session: Optional[aiohttp.ClientSession] = None
+        self.tracked_wallets = DEFAULT_KOL_WALLETS.copy()
+        self.recent_buys: Dict[str, List[dict]] = {}
+        self.existing_token_callback = None
+        self.posted_kol_counts: Dict[str, int] = {}
         self.running = False
-        self.tracked_wallets = {}
-        self.recent_buys: Dict[str, List[dict]] = {}  # token -> [{wallet, kol_name, timestamp, amount}]
-        self.last_signatures: Dict[str, str] = {}  # wallet -> last processed signature
-        self.existing_token_callback = None  # Callback for when KOLs buy already-posted tokens
-        self.posted_kol_counts: Dict[str, int] = {}  # token -> number of KOLs we've posted about
     
     def set_existing_token_callback(self, callback):
         """Set callback for when KOLs buy already-called tokens"""
         self.existing_token_callback = callback
     
     async def start(self):
-        """Start monitoring KOL wallets"""
-        
-        if not HELIUS_API_KEY:
-            logger.warning("⚠️ HELIUS_API_KEY not set - KOL wallet tracking disabled")
-            logger.info("📝 Get free API key from https://helius.dev")
-            return
-        
-        # Merge default wallets with env var wallets
-        self.tracked_wallets = DEFAULT_KOL_WALLETS.copy()
-        
-        # Add any additional wallets from env var
-        for wallet in TRACKED_WALLETS:
-            wallet = wallet.strip()
-            if wallet and wallet not in self.tracked_wallets:
-                self.tracked_wallets[wallet] = {'name': 'Tracked', 'tier': 'tracked'}
-        
-        if not self.tracked_wallets:
-            logger.warning("⚠️ No KOL wallets configured")
-            return
-        
-        logger.info(f"📊 Tracking {len(self.tracked_wallets)} KOL wallets:")
+        """Initialize tracker (webhook-based, no polling loop needed)"""
+        logger.info(f"📊 KOL Wallet Tracker initialized (webhook-based)")
+        logger.info(f"📊 Tracking {len(self.tracked_wallets)} KOL wallets")
         for wallet, info in self.tracked_wallets.items():
             logger.info(f"  • {info['name']} ({info['tier']}): {wallet[:8]}...")
         
-        self.session = aiohttp.ClientSession()
         self.running = True
-        
-        # Start monitoring loop
-        asyncio.create_task(self._monitor_loop())
-        logger.success("✅ KOL wallet tracking started")
+        logger.success("✅ KOL wallet tracking ready (webhook mode)")
     
     async def stop(self):
-        """Stop monitoring"""
+        """Stop tracker"""
         self.running = False
-        if self.session:
-            await self.session.close()
         logger.info("KOL wallet tracker stopped")
     
-    async def _monitor_loop(self):
-        """Continuously poll for new transactions"""
-        while self.running:
-            try:
-                for wallet_address, wallet_info in self.tracked_wallets.items():
-                    await self._check_wallet_transactions(wallet_address, wallet_info)
-                    await asyncio.sleep(2)  # Small delay between wallets
+    async def process_webhook(self, webhook_data: list):
+        """Process incoming webhook from Helius"""
+        try:
+            # Helius sends array of transactions
+            if not isinstance(webhook_data, list):
+                webhook_data = [webhook_data]
+            
+            for tx_data in webhook_data:
+                await self._process_transaction_webhook(tx_data)
+        
+        except Exception as e:
+            logger.error(f"Error processing KOL webhook: {e}", exc_info=True)
+    
+    async def _process_transaction_webhook(self, tx_data: dict):
+        """Process a single transaction from webhook"""
+        try:
+            # Get account keys to find which wallet this is from
+            account_keys = tx_data.get("accountData", [])
+            
+            # Find which KOL wallet is involved
+            kol_wallet = None
+            wallet_info = None
+            
+            for account in account_keys:
+                addr = account.get("account", "")
+                if addr in self.tracked_wallets:
+                    kol_wallet = addr
+                    wallet_info = self.tracked_wallets[addr]
+                    break
+            
+            if not kol_wallet:
+                return  # Not from our tracked wallets
+            
+            # Check if this is a swap
+            if not self._is_swap_transaction_webhook(tx_data):
+                return
+            
+            # Analyze token changes
+            bought_tokens = self._analyze_token_changes_webhook(tx_data, kol_wallet)
+            
+            for token_mint, amount in bought_tokens:
+                logger.info(f"🎯 {wallet_info['name']} bought {token_mint[:8]}...")
                 
-                # Clean up old buys
+                # Initialize list if needed
+                if token_mint not in self.recent_buys:
+                    self.recent_buys[token_mint] = []
+                
+                # Check if this wallet already has an entry
+                existing_buy = next(
+                    (b for b in self.recent_buys[token_mint] if b['wallet'] == kol_wallet),
+                    None
+                )
+                
+                if existing_buy:
+                    # Update existing entry
+                    existing_buy['timestamp'] = datetime.now()
+                    existing_buy['amount'] += amount
+                else:
+                    # NEW wallet buying this token
+                    previous_unique_kols = len(self.recent_buys[token_mint])
+                    
+                    self.recent_buys[token_mint].append({
+                        'wallet': kol_wallet,
+                        'kol_name': wallet_info['name'],
+                        'tier': wallet_info['tier'],
+                        'timestamp': datetime.now(),
+                        'amount': amount
+                    })
+                    
+                    current_unique_kols = len(self.recent_buys[token_mint])
+                    
+                    # Trigger callback for NEW wallets on existing tokens
+                    if previous_unique_kols > 0 and current_unique_kols > previous_unique_kols:
+                        if self.existing_token_callback:
+                            last_posted_count = self.posted_kol_counts.get(token_mint, 0)
+                            
+                            if current_unique_kols > last_posted_count:
+                                await self.existing_token_callback(
+                                    token_mint,
+                                    wallet_info['name'],
+                                    current_unique_kols
+                                )
+                                self.posted_kol_counts[token_mint] = current_unique_kols
+                
+                # Cleanup old buys periodically
                 self._cleanup_old_buys()
-                
-                await asyncio.sleep(POLL_INTERVAL)
-                
-            except Exception as e:
-                logger.error(f"Error in KOL monitoring loop: {e}", exc_info=True)
-                await asyncio.sleep(10)
-    
-    async def _check_wallet_transactions(self, wallet_address: str, wallet_info: dict):
-        """Fetch and process recent transactions for a wallet"""
-        try:
-            payload = {
-                "jsonrpc": "2.0",
-                "id": 1,
-                "method": "getSignaturesForAddress",
-                "params": [
-                    wallet_address,
-                    {
-                        "limit": 10,
-                    }
-                ]
-            }
-            
-            # Add 'before' parameter if we have a last signature
-            if wallet_address in self.last_signatures:
-                payload["params"][1]["before"] = self.last_signatures[wallet_address]
-            
-            async with self.session.post(HELIUS_RPC, json=payload) as resp:
-                if resp.status != 200:
-                    logger.warning(f"Helius returned {resp.status} for {wallet_info['name']}")
-                    return
-                
-                data = await resp.json()
-                signatures = data.get("result", [])
-                
-                if not signatures:
-                    return
-                
-                # Update last signature
-                self.last_signatures[wallet_address] = signatures[0]["signature"]
-                
-                # Process each transaction
-                for sig_info in reversed(signatures):  # Process oldest first
-                    if sig_info.get("err"):
-                        continue
-                    
-                    await self._process_transaction(
-                        sig_info["signature"],
-                        wallet_address,
-                        wallet_info
-                    )
         
         except Exception as e:
-            logger.debug(f"Error checking {wallet_info['name']}: {e}")
+            logger.debug(f"Error processing transaction webhook: {e}")
     
-    async def _process_transaction(self, signature: str, wallet_address: str, wallet_info: dict):
-        """Process a single transaction to detect token buys"""
+    def _is_swap_transaction_webhook(self, tx_data: dict) -> bool:
+        """Check if transaction is a swap"""
         try:
-            payload = {
-                "jsonrpc": "2.0",
-                "id": 1,
-                "method": "getTransaction",
-                "params": [
-                    signature,
-                    {
-                        "encoding": "jsonParsed",
-                        "maxSupportedTransactionVersion": 0
-                    }
-                ]
-            }
+            # Check account keys for Raydium/Jupiter
+            account_data = tx_data.get("accountData", [])
             
-            async with self.session.post(HELIUS_RPC, json=payload) as resp:
-                if resp.status != 200:
-                    return
-                
-                data = await resp.json()
-                tx = data.get("result")
-                
-                if not tx or not tx.get("meta"):
-                    return
-                
-                # Check if this is a swap transaction
-                if not self._is_swap_transaction(tx):
-                    return
-                
-                # Analyze token balance changes
-                bought_tokens = self._analyze_token_changes(tx, wallet_address)
-                
-                for token_mint, amount in bought_tokens:
-                    logger.info(f"🎯 {wallet_info['name']} bought {token_mint[:8]}...")
-                    
-                    # Initialize list if needed
-                    if token_mint not in self.recent_buys:
-                        self.recent_buys[token_mint] = []
-                    
-                    # Check if this wallet already has an entry for this token
-                    existing_buy = next(
-                        (b for b in self.recent_buys[token_mint] if b['wallet'] == wallet_address), 
-                        None
-                    )
-                    
-                    if existing_buy:
-                        # Update existing entry - same wallet buying more
-                        logger.debug(f"Updating existing buy for {wallet_info['name']} on {token_mint[:8]}...")
-                        existing_buy['timestamp'] = datetime.now()
-                        existing_buy['amount'] += amount
-                        existing_buy['signature'] = signature
-                        # Don't trigger callback for same wallet buying more
-                    else:
-                        # NEW wallet buying this token!
-                        previous_unique_kols = len(self.recent_buys[token_mint])
-                        
-                        self.recent_buys[token_mint].append({
-                            'wallet': wallet_address,
-                            'kol_name': wallet_info['name'],
-                            'tier': wallet_info['tier'],
-                            'timestamp': datetime.now(),
-                            'amount': amount,
-                            'signature': signature
-                        })
-                        
-                        current_unique_kols = len(self.recent_buys[token_mint])
-                        
-                        # Trigger callback only for NEW wallets on existing tokens
-                        if previous_unique_kols > 0 and current_unique_kols > previous_unique_kols:
-                            if self.existing_token_callback:
-                                # Check if we've already posted about this many unique KOLs
-                                last_posted_count = self.posted_kol_counts.get(token_mint, 0)
-                                
-                                if current_unique_kols > last_posted_count:
-                                    asyncio.create_task(
-                                        self.existing_token_callback(
-                                            token_mint, 
-                                            wallet_info['name'],
-                                            current_unique_kols
-                                        )
-                                    )
-                                    self.posted_kol_counts[token_mint] = current_unique_kols
-        
-        except Exception as e:
-            logger.debug(f"Error processing transaction: {e}")
-    
-    def _is_swap_transaction(self, tx: dict) -> bool:
-        """Check if transaction involves Raydium or Jupiter"""
-        try:
-            account_keys = tx.get("transaction", {}).get("message", {}).get("accountKeys", [])
-            
-            for key in account_keys:
-                pubkey = key if isinstance(key, str) else key.get("pubkey", "")
-                
-                if pubkey in RAYDIUM_PROGRAMS or pubkey == JUPITER_PROGRAM:
+            for account in account_data:
+                addr = account.get("account", "")
+                if addr in RAYDIUM_PROGRAMS or addr == JUPITER_PROGRAM:
                     return True
             
-            return False
+            # Also check nativeTransfers and tokenTransfers for swap indicators
+            token_transfers = tx_data.get("tokenTransfers", [])
+            return len(token_transfers) >= 2  # Swaps involve at least 2 token transfers
+        
         except:
             return False
     
-    def _analyze_token_changes(self, tx: dict, wallet_address: str) -> List[Tuple[str, float]]:
-        """Analyze token balance changes to detect buys"""
+    def _analyze_token_changes_webhook(self, tx_data: dict, wallet_address: str) -> List[Tuple[str, float]]:
+        """Analyze token changes from webhook data"""
         bought_tokens = []
         
         try:
-            pre_balances = tx.get("meta", {}).get("preTokenBalances", [])
-            post_balances = tx.get("meta", {}).get("postTokenBalances", [])
+            token_transfers = tx_data.get("tokenTransfers", [])
             
-            # Create maps by mint address
-            pre_map = {}
-            for balance in pre_balances:
-                if balance.get("owner") == wallet_address:
-                    mint = balance.get("mint")
-                    amount = float(balance.get("uiTokenAmount", {}).get("uiAmount", 0))
-                    pre_map[mint] = amount
+            # Track token balance changes for this wallet
+            token_changes = {}
             
-            post_map = {}
-            for balance in post_balances:
-                if balance.get("owner") == wallet_address:
-                    mint = balance.get("mint")
-                    amount = float(balance.get("uiTokenAmount", {}).get("uiAmount", 0))
-                    post_map[mint] = amount
-            
-            # Find tokens with positive balance change (buys)
-            for mint in post_map:
-                pre_amount = pre_map.get(mint, 0)
-                post_amount = post_map.get(mint, 0)
+            for transfer in token_transfers:
+                from_addr = transfer.get("fromUserAccount", "")
+                to_addr = transfer.get("toUserAccount", "")
+                mint = transfer.get("mint", "")
+                amount = float(transfer.get("tokenAmount", 0))
                 
-                if post_amount > pre_amount:
-                    change = post_amount - pre_amount
-                    # Filter out tiny amounts (dust)
-                    if change > 1:
-                        bought_tokens.append((mint, change))
+                # Track incoming tokens to our wallet
+                if to_addr == wallet_address:
+                    token_changes[mint] = token_changes.get(mint, 0) + amount
+                
+                # Track outgoing tokens from our wallet
+                if from_addr == wallet_address:
+                    token_changes[mint] = token_changes.get(mint, 0) - amount
+            
+            # Find tokens with positive net change (buys)
+            for mint, change in token_changes.items():
+                if change > 1:  # Filter dust
+                    bought_tokens.append((mint, change))
         
         except Exception as e:
             logger.debug(f"Error analyzing token changes: {e}")
@@ -311,18 +214,13 @@ class KOLWalletTracker:
                 if buy['timestamp'] > cutoff
             ]
             
-            # Remove token entry if no buys remain
             if not self.recent_buys[token_mint]:
                 del self.recent_buys[token_mint]
-                # Also clean up posted count tracking
                 if token_mint in self.posted_kol_counts:
                     del self.posted_kol_counts[token_mint]
     
     def get_kol_buy_boost(self, token_mint: str) -> Tuple[float, List[str]]:
-        """
-        Calculate conviction score boost based on KOL activity
-        Returns: (boost_points, reasons)
-        """
+        """Calculate conviction score boost based on KOL activity"""
         if token_mint not in self.recent_buys:
             return (0, [])
         
@@ -331,32 +229,27 @@ class KOLWalletTracker:
         if not buys:
             return (0, [])
         
-        # Count UNIQUE wallets only (buys list already deduplicated)
         top_kols = [b for b in buys if b['tier'] == 'top']
         tracked_kols = [b for b in buys if b['tier'] == 'tracked']
         
         boost = 0
         reasons = []
         
-        # Top-tier KOLs get 15 points each
         if top_kols:
             top_boost = len(top_kols) * 15
             boost += top_boost
             
-            # Get unique KOL names (no duplicates)
             kol_names = list(set([b['kol_name'] for b in top_kols]))
-            kol_names_str = ', '.join(kol_names[:3])  # Show max 3 names
+            kol_names_str = ', '.join(kol_names[:3])
             
             count_text = f"{len(top_kols)} top KOL" + ("s" if len(top_kols) > 1 else "")
             reasons.append(f"{count_text}: {kol_names_str}")
         
-        # Tracked KOLs get 5 points each
         if tracked_kols:
             tracked_boost = len(tracked_kols) * 5
             boost += tracked_boost
             reasons.append(f"{len(tracked_kols)} tracked KOL{'s' if len(tracked_kols) > 1 else ''}")
         
-        # Confluence bonus: Multiple unique KOLs on same token
         total_unique_kols = len(buys)
         if total_unique_kols >= 3:
             confluence_boost = 10
@@ -367,7 +260,26 @@ class KOLWalletTracker:
             boost += confluence_boost
             reasons.append(f"Multiple KOLs ({total_unique_kols})")
         
-        # Cap total boost at 50 points
         boost = min(boost, 50)
         
         return (boost, reasons)
+```
+
+## **Step 3: Deploy**
+
+1. **Commit both files to GitHub** (main.py and kol_wallet_tracker.py)
+2. Railway will auto-deploy
+3. **Remove the 99999 variable** from Railway (or set `KOL_WALLET_POLL_INTERVAL` back to normal - doesn't matter, it's not used anymore)
+
+## **What you'll see:**
+
+Instead of this spam:
+```
+WARNING | kol_wallet_tracker - Helius returned 429 for CENTED
+WARNING | kol_wallet_tracker - Helius returned 429 for BRADJAE
+```
+
+You'll see:
+```
+🎯 CENTED bought 7Xd8Qr...
+✅ KOL wallet tracking ready (webhook mode)
