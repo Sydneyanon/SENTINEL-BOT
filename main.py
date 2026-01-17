@@ -205,7 +205,7 @@ async def main():
                                 conviction_data["symbol"],
                                 conviction_data.get("name", ""),
                                 final_score,
-                                conviction_data["price"],
+                                conviction_data["priceUsd"],
                                 conviction_data["liquidity_usd"],
                                 conviction_data["volume_24h"],
                                 conviction_data["pair_address"],
