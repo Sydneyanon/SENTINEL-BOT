@@ -1,4 +1,4 @@
-      """
+"""
 Performance Tracker - Monitors posted signals for milestone achievements AND metric changes
 """
 
