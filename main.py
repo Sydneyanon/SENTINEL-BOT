@@ -42,6 +42,10 @@ db = None
 publisher = None
 kol_tracker = None
 
+# Race condition prevention
+processing_tokens = set()  # Track tokens currently being processed
+processing_lock = asyncio.Lock()
+
 def signal_handler(signum, frame):
     logger.info(f"Received signal {signum}, initiating shutdown...")
     shutdown_event.set()
@@ -158,14 +162,22 @@ async def main():
         await health_check_server()
         
         async def process_token(token_mint: str):
+            """Process a token - deduplicated with lock to prevent race conditions"""
+            
+            # Prevent duplicate processing from multiple sources
+            async with processing_lock:
+                if token_mint in processing_tokens:
+                    logger.debug(f"Token {token_mint} already being processed, skipping")
+                    return
+                processing_tokens.add(token_mint)
+            
             try:
-                try:
-                    existing = await db.get_signal(token_mint)
-                    if existing:
-                        logger.debug(f"Token {token_mint} already processed, skipping")
-                        return
-                except AttributeError:
-                    pass
+                # Check if already in database
+                existing = await db.get_signal(token_mint)
+                if existing:
+                    processing_tokens.discard(token_mint)
+                    logger.debug(f"Token {token_mint} already in database, skipping")
+                    return
                 
                 logger.info(f"🔍 Processing token: {token_mint}")
                 
@@ -198,7 +210,7 @@ async def main():
                         
                         score, reasons = conviction_filter.calculate_conviction_score(token_data)
                         
-                        # Check KOL involvement (if tracker has the method)
+                        # Check KOL involvement
                         kol_boost = 0
                         try:
                             if hasattr(kol_tracker, 'get_kol_buy_boost'):
@@ -212,7 +224,7 @@ async def main():
                         final_score = score + kol_boost
                         
                         if final_score < MIN_CONVICTION_SCORE:
-                            logger.info(f"📉 {pair.get("baseToken", {}).get("symbol", "UNKNOWN")} scored {final_score:.0f} (below {MIN_CONVICTION_SCORE})")
+                            logger.info(f"📉 {pair.get('baseToken', {}).get('symbol', 'UNKNOWN')} scored {final_score:.0f} (below {MIN_CONVICTION_SCORE})")
                             return
                         
                         conviction_data = {
@@ -238,7 +250,7 @@ async def main():
                                 conviction_data["symbol"],
                                 conviction_data.get("name", ""),
                                 final_score,
-                                conviction_data["priceUsd"],  # ✅ FIXED: was "price"
+                                conviction_data["priceUsd"],
                                 conviction_data["liquidity_usd"],
                                 conviction_data["volume_24h"],
                                 conviction_data["pair_address"],
@@ -246,10 +258,14 @@ async def main():
                             )
                             
                             await performance_tracker.track_token(token_mint)
-                            logger.info(f"✅ Tracking started for {conviction_data['symbol']}")
+                            logger.info(f"✅ Signal posted and tracking started for {conviction_data['symbol']}")
                     
             except Exception as e:
                 logger.error(f"Error processing {token_mint}: {e}", exc_info=True)
+            
+            finally:
+                # Always remove from processing set
+                processing_tokens.discard(token_mint)
         
         graduation_monitor.set_callback(process_token)
         
