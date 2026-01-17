@@ -50,6 +50,12 @@ class KOLWalletTracker:
         self.tracked_wallets = {}
         self.recent_buys: Dict[str, List[dict]] = {}  # token -> [{wallet, kol_name, timestamp, amount}]
         self.last_signatures: Dict[str, str] = {}  # wallet -> last processed signature
+        self.existing_token_callback = None  # Callback for when KOLs buy already-posted tokens
+        self.posted_kol_counts: Dict[str, int] = {}  # token -> number of KOLs we've posted about
+    
+    def set_existing_token_callback(self, callback):
+        """Set callback for when KOLs buy already-called tokens"""
+        self.existing_token_callback = callback
     
     async def start(self):
         """Start monitoring KOL wallets"""
@@ -190,6 +196,9 @@ class KOLWalletTracker:
                 for token_mint, amount in bought_tokens:
                     logger.info(f"🎯 {wallet_info['name']} bought {token_mint[:8]}...")
                     
+                    # Check if this is a NEW KOL for this token
+                    previous_kol_count = len(self.recent_buys.get(token_mint, []))
+                    
                     # Store the buy
                     if token_mint not in self.recent_buys:
                         self.recent_buys[token_mint] = []
@@ -202,6 +211,24 @@ class KOLWalletTracker:
                         'amount': amount,
                         'signature': signature
                     })
+                    
+                    current_kol_count = len(self.recent_buys[token_mint])
+                    
+                    # If this token has seen KOL activity before, and we have a callback, trigger it
+                    if previous_kol_count > 0 and current_kol_count > previous_kol_count:
+                        if self.existing_token_callback:
+                            # Check if we've already posted about this many KOLs
+                            last_posted_count = self.posted_kol_counts.get(token_mint, 0)
+                            
+                            if current_kol_count > last_posted_count:
+                                asyncio.create_task(
+                                    self.existing_token_callback(
+                                        token_mint, 
+                                        wallet_info['name'],
+                                        current_kol_count
+                                    )
+                                )
+                                self.posted_kol_counts[token_mint] = current_kol_count
         
         except Exception as e:
             logger.debug(f"Error processing transaction: {e}")
@@ -273,6 +300,9 @@ class KOLWalletTracker:
             # Remove token entry if no buys remain
             if not self.recent_buys[token_mint]:
                 del self.recent_buys[token_mint]
+                # Also clean up posted count tracking
+                if token_mint in self.posted_kol_counts:
+                    del self.posted_kol_counts[token_mint]
     
     def get_kol_buy_boost(self, token_mint: str) -> Tuple[float, List[str]]:
         """
