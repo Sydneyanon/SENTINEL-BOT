@@ -1,4 +1,4 @@
-"""
+        """
 KOL Wallet Tracker - Webhook-based monitoring (no polling!)
 """
 import os
@@ -163,7 +163,7 @@ class KOLWalletTracker:
                 if addr in RAYDIUM_PROGRAMS or addr == JUPITER_PROGRAM:
                     return True
             
-            # Also check nativeTransfers and tokenTransfers for swap indicators
+            # Also check token transfers for swap indicators
             token_transfers = tx_data.get("tokenTransfers", [])
             return len(token_transfers) >= 2  # Swaps involve at least 2 token transfers
         
@@ -263,23 +263,3 @@ class KOLWalletTracker:
         boost = min(boost, 50)
         
         return (boost, reasons)
-```
-
-## **Step 3: Deploy**
-
-1. **Commit both files to GitHub** (main.py and kol_wallet_tracker.py)
-2. Railway will auto-deploy
-3. **Remove the 99999 variable** from Railway (or set `KOL_WALLET_POLL_INTERVAL` back to normal - doesn't matter, it's not used anymore)
-
-## **What you'll see:**
-
-Instead of this spam:
-```
-WARNING | kol_wallet_tracker - Helius returned 429 for CENTED
-WARNING | kol_wallet_tracker - Helius returned 429 for BRADJAE
-```
-
-You'll see:
-```
-🎯 CENTED bought 7Xd8Qr...
-✅ KOL wallet tracking ready (webhook mode)
