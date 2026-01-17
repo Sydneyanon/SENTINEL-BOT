@@ -18,3 +18,9 @@ loguru>=0.7.0
 tenacity>=8.2.3
 
 psycopg2-binary
+
+# Telegram Monitoring
+telethon>=1.34.0           
+
+# Twitter moitoring (free alternative)
+twscrape>=0.8.0          
