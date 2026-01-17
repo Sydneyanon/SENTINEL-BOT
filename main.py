@@ -75,10 +75,28 @@ async def health_check_server():
             logger.error(f"Error processing webhook: {e}", exc_info=True)
             return web.Response(text="Error", status=500)
     
+    async def kol_webhook(request):
+        """Handle KOL wallet transaction webhooks from Helius"""
+        try:
+            data = await request.json()
+            logger.debug(f"📥 Received KOL transaction webhook")
+            
+            if kol_tracker:
+                await kol_tracker.process_webhook(data)
+                return web.Response(text="OK", status=200)
+            else:
+                logger.warning("KOL tracker not initialized")
+                return web.Response(text="Tracker not ready", status=503)
+                
+        except Exception as e:
+            logger.error(f"Error processing KOL webhook: {e}", exc_info=True)
+            return web.Response(text="Error", status=500)
+    
     app = web.Application()
     app.router.add_get("/health", health)
     app.router.add_get("/", health)
     app.router.add_post("/webhook/graduation", helius_webhook)
+    app.router.add_post("/webhook/kol-transaction", kol_webhook)
     
     runner = web.AppRunner(app)
     await runner.setup()
@@ -87,6 +105,7 @@ async def health_check_server():
     
     logger.info(f"✓ Health check server started on port {PORT}")
     logger.info(f"✓ Webhook endpoint: POST /webhook/graduation")
+    logger.info(f"✓ Webhook endpoint: POST /webhook/kol-transaction")
 
 
 async def post_kol_followup(token_mint: str, symbol: str, kol_boost: float, kol_reasons: list):
