@@ -13,6 +13,7 @@ load_dotenv()
 TELEGRAM_BOT_TOKEN = os.getenv('TELEGRAM_BOT_TOKEN')
 TELEGRAM_CHANNEL_ID = os.getenv('TELEGRAM_CHANNEL_ID')
 
+
 class TelegramPublisher:
     """Handles posting signals to Telegram channel"""
     
@@ -71,8 +72,7 @@ class TelegramPublisher:
         price_change = token_data.get('price_change_24h', 0)
         
         # Build message
-        message = f"""
-**NEW SIGNAL**
+        message = f"""**NEW SIGNAL**
 Token: ${symbol}
 Conviction: {conviction}/100
 
