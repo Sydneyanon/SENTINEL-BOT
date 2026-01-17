@@ -1,6 +1,6 @@
 """
 Sentinel Signals - Main Bot Entry Point
-Monitors pump.fun graduations + Helius webhooks + KOL wallets
+Monitors pump.fun graduations + Helius webhooks + KOL wallets + EARLY DETECTION
 """
 import os
 import sys
@@ -26,6 +26,9 @@ from outcome_tracker import OutcomeTracker
 from telegram_admin_bot import TelegramAdminBot
 from conviction_filter import ConvictionFilter
 
+# NEW: Early detection system
+from early_signals_monitor import EarlySignalsMonitor
+
 # Configuration
 TELEGRAM_BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN")
 TELEGRAM_CHANNEL_ID = os.getenv("TELEGRAM_CHANNEL_ID")
@@ -33,6 +36,7 @@ ADMIN_BOT_TOKEN = os.getenv("ADMIN_BOT_TOKEN")
 DB_PATH = os.getenv("DB_PATH", "sentinel.db")
 PORT = int(os.getenv("PORT", 8080))
 MIN_CONVICTION_SCORE = float(os.getenv("MIN_CONVICTION_SCORE", 70))
+MIN_EARLY_CONVICTION = float(os.getenv("MIN_EARLY_CONVICTION", 85))
 
 # Global shutdown flag
 shutdown_event = asyncio.Event()
@@ -42,6 +46,7 @@ graduation_monitor = None
 db = None
 publisher = None
 kol_tracker = None
+early_monitor = None
 
 # Race condition prevention
 processing_tokens = set()  # Track tokens currently being processed
@@ -107,11 +112,29 @@ async def health_check_server():
             logger.error(f"Error processing KOL webhook: {e}", exc_info=True)
             return web.Response(text="Error", status=500)
     
+    async def smart_money_webhook(request):
+        """Handle smart money wallet webhooks from Helius (EARLY DETECTION)"""
+        try:
+            data = await request.json()
+            logger.debug(f"📥 Received smart money webhook")
+            
+            if early_monitor and early_monitor.smart_money:
+                await early_monitor.smart_money.process_webhook(data)
+                return web.Response(text="OK", status=200)
+            else:
+                logger.warning("Smart money tracker not initialized")
+                return web.Response(text="Monitor not ready", status=503)
+                
+        except Exception as e:
+            logger.error(f"Error processing smart money webhook: {e}", exc_info=True)
+            return web.Response(text="Error", status=500)
+    
     app = web.Application()
     app.router.add_get("/health", health)
     app.router.add_get("/", health)
     app.router.add_post("/webhook/graduation", helius_webhook)
     app.router.add_post("/webhook/kol-transaction", kol_webhook)
+    app.router.add_post("/webhook/smart-money", smart_money_webhook)  # NEW!
     
     runner = web.AppRunner(app)
     await runner.setup()
@@ -121,6 +144,7 @@ async def health_check_server():
     logger.info(f"✓ Health check server started on port {PORT}")
     logger.info(f"✓ Webhook endpoint: POST /webhook/graduation")
     logger.info(f"✓ Webhook endpoint: POST /webhook/kol-transaction")
+    logger.info(f"✓ Webhook endpoint: POST /webhook/smart-money (EARLY DETECTION)")
 
 
 async def post_kol_followup(token_mint: str, symbol: str, kol_boost: float, kol_reasons: list):
@@ -143,7 +167,7 @@ Score boost: +{kol_boost:.0f}
 
 
 async def main():
-    global graduation_monitor, db, publisher, kol_tracker
+    global graduation_monitor, db, publisher, kol_tracker, early_monitor
     
     logger.info("=" * 60)
     logger.info("SENTINEL SIGNALS - Starting up...")
@@ -177,8 +201,50 @@ async def main():
                 kol_boost, kol_reasons = kol_tracker.get_kol_buy_boost(token_mint)
                 await post_kol_followup(token_mint, symbol, kol_boost, kol_reasons)
         
+        # Set callback for early signal detection (KOL buys)
+        async def on_kol_early_buy(token_mint: str, kol_name: str):
+            """Called when a KOL buys a NEW token - check if we should signal early"""
+            existing = await db.has_seen(token_mint)
+            if existing:
+                logger.debug(f"Token {token_mint[:8]} already signaled, skipping early check")
+                return
+            
+            logger.info(f"🔍 KOL EARLY CHECK: {kol_name} bought {token_mint[:8]}... evaluating")
+            await process_token(token_mint, signal_type="kol_early", kol_name=kol_name)
+        
         kol_tracker.set_existing_token_callback(on_kol_buy_existing)
-        logger.info("✓ KOL wallet tracker ready")
+        kol_tracker.set_early_signal_callback(on_kol_early_buy)
+        logger.info("✓ KOL wallet tracker ready (with early signal detection)")
+        
+        # NEW: Initialize early detection system
+        early_monitor = EarlySignalsMonitor(db, publisher, conviction_filter)
+        
+        # Set callback for ultra-early signals
+        async def on_ultra_early_signal(
+            token_mint: str,
+            signal_type: str,
+            early_score: float,
+            curve_completion: float,
+            signal_data: dict
+        ):
+            """Called when ultra-early high-conviction signal is detected"""
+            logger.success(f"🎯 ULTRA EARLY SIGNAL DETECTED!")
+            logger.info(f"   Token: {token_mint[:8]}")
+            logger.info(f"   Curve: {curve_completion:.1f}%")
+            logger.info(f"   Score: {early_score}")
+            logger.info(f"   Sources: {signal_data.get('signal_count', 0)}")
+            
+            # Process with special ultra_early signal type
+            await process_token(
+                token_mint,
+                signal_type="ultra_early",
+                early_score=early_score,
+                curve_completion=curve_completion,
+                signal_data=signal_data
+            )
+        
+        early_monitor.set_signal_callback(on_ultra_early_signal)
+        logger.info(f"✓ Early detection system ready (min score: {MIN_EARLY_CONVICTION})")
         
         performance_tracker = PerformanceTracker(db, publisher)
         momentum_analyzer = MomentumAnalyzer(db, publisher)
@@ -195,8 +261,22 @@ async def main():
         
         await health_check_server()
         
-        async def process_token(token_mint: str):
-            """Process a token - deduplicated with lock to prevent race conditions"""
+        async def process_token(
+            token_mint: str,
+            signal_type: str = "graduated",
+            kol_name: str = None,
+            curve_completion: float = None,
+            early_score: float = None,
+            signal_data: dict = None
+        ):
+            """
+            Process a token - deduplicated with lock to prevent race conditions
+            
+            signal_type can be:
+            - "ultra_early" (0-70% curve, multiple signal sources)
+            - "kol_early" (KOL bought)
+            - "graduated" (100% curve, on Raydium)
+            """
             
             # Prevent duplicate processing from multiple sources
             async with processing_lock:
@@ -213,7 +293,12 @@ async def main():
                 processing_tokens.add(token_mint)
             
             try:
-                logger.info(f"🔍 Processing token: {token_mint}")
+                if signal_type == "ultra_early":
+                    logger.info(f"🎯 PROCESSING ULTRA EARLY: {token_mint} at {curve_completion:.1f}% curve")
+                elif signal_type == "kol_early":
+                    logger.info(f"🎯 KOL EARLY SIGNAL CHECK: {token_mint} (triggered by {kol_name})")
+                else:
+                    logger.info(f"🔍 Processing token: {token_mint}")
                 
                 import aiohttp
                 async with aiohttp.ClientSession() as session:
@@ -227,7 +312,7 @@ async def main():
                         pairs = data.get("pairs", [])
                         
                         if not pairs:
-                            logger.info(f"❌ No DEX data for {token_mint}")
+                            logger.info(f"❌ No DEX data for {token_mint} (might be too early or not liquid yet)")
                             return
                         
                         pair = pairs[0]
@@ -239,27 +324,58 @@ async def main():
                             "txns_24h_buys": int(pair.get("txns", {}).get("h24", {}).get("buys", 0)),
                             "txns_24h_sells": int(pair.get("txns", {}).get("h24", {}).get("sells", 0)),
                             "market_cap": float(pair.get("marketCap", 0)),
-                            "signal_type": "graduated"
+                            "signal_type": signal_type
                         }
                         
-                        score, reasons = conviction_filter.calculate_conviction_score(token_data)
-                        
-                        # Check KOL involvement
-                        kol_boost = 0
-                        try:
-                            if hasattr(kol_tracker, 'get_kol_buy_boost'):
-                                kol_boost, kol_reasons = kol_tracker.get_kol_buy_boost(token_mint)
-                                if kol_boost > 0:
-                                    reasons.extend(kol_reasons)
-                                    logger.info(f"🎯 KOL boost: +{kol_boost} ({', '.join(kol_reasons)})")
-                        except Exception as e:
-                            logger.debug(f"KOL boost check failed: {e}")
-                        
-                        final_score = score + kol_boost
-                        
-                        if final_score < MIN_CONVICTION_SCORE:
-                            logger.info(f"📉 {pair.get('baseToken', {}).get('symbol', 'UNKNOWN')} scored {final_score:.0f} (below {MIN_CONVICTION_SCORE})")
-                            return
+                        # For ultra_early signals, we already have the score
+                        if signal_type == "ultra_early":
+                            final_score = early_score
+                            reasons = []
+                            
+                            # Build reasons from signal_data
+                            smart_money = signal_data.get('smart_money', [])
+                            kols = signal_data.get('kols', [])
+                            telegram = signal_data.get('telegram', [])
+                            twitter = signal_data.get('twitter', [])
+                            
+                            if smart_money:
+                                names = ', '.join([w['name'] for w in smart_money[:3]])
+                                reasons.append(f"💰 {len(smart_money)} alpha wallets: {names}")
+                            if kols:
+                                names = ', '.join([w['name'] for w in kols[:3]])
+                                reasons.append(f"📢 {len(kols)} KOLs: {names}")
+                            if telegram:
+                                reasons.append(f"📱 {len(telegram)} Telegram calls")
+                            if twitter:
+                                reasons.append(f"🐦 {len(twitter)} Twitter calls")
+                            
+                            reasons.append(f"⚡ {curve_completion:.1f}% bonding curve")
+                        else:
+                            # Calculate score normally
+                            score, reasons = conviction_filter.calculate_conviction_score(token_data)
+                            
+                            # Check KOL involvement
+                            kol_boost = 0
+                            try:
+                                if hasattr(kol_tracker, 'get_kol_buy_boost'):
+                                    kol_boost, kol_reasons = kol_tracker.get_kol_buy_boost(token_mint)
+                                    if kol_boost > 0:
+                                        reasons.extend(kol_reasons)
+                                        logger.info(f"🎯 KOL boost: +{kol_boost} ({', '.join(kol_reasons)})")
+                            except Exception as e:
+                                logger.debug(f"KOL boost check failed: {e}")
+                            
+                            final_score = score + kol_boost
+                            
+                            # Different thresholds for different signal types
+                            if signal_type == "kol_early":
+                                min_score = MIN_CONVICTION_SCORE - 10  # Lenient (60 if base is 70)
+                            else:
+                                min_score = MIN_CONVICTION_SCORE  # Standard (70)
+                            
+                            if final_score < min_score:
+                                logger.info(f"📉 {pair.get('baseToken', {}).get('symbol', 'UNKNOWN')} scored {final_score:.0f} (below {min_score})")
+                                return
                         
                         conviction_data = {
                             "symbol": pair.get("baseToken", {}).get("symbol", "UNKNOWN"),
@@ -273,10 +389,20 @@ async def main():
                             "price_change_24h": token_data["price_change_24h"],
                             "market_cap": token_data["market_cap"],
                             "pair_address": pair.get("pairAddress", ""),
-                            "dex_url": pair.get("url", "")
+                            "dex_url": pair.get("url", ""),
+                            "signal_type": signal_type,
+                            "kol_name": kol_name,
+                            "curve_completion": curve_completion,
+                            "signal_sources": signal_data
                         }
                         
-                        logger.info(f"🚀 {conviction_data['symbol']} scored {final_score:.0f}!")
+                        if signal_type == "ultra_early":
+                            logger.success(f"🚀 ULTRA EARLY SIGNAL: {conviction_data['symbol']} scored {final_score:.0f}! ({curve_completion:.1f}% curve)")
+                        elif signal_type == "kol_early":
+                            logger.success(f"🚀 KOL EARLY SIGNAL: {conviction_data['symbol']} scored {final_score:.0f}! (triggered by {kol_name})")
+                        else:
+                            logger.info(f"🚀 {conviction_data['symbol']} scored {final_score:.0f}!")
+                        
                         message_id = await publisher.post_signal(conviction_data)
                         
                         if message_id:
@@ -308,14 +434,23 @@ async def main():
         logger.info("🚀 ALL SYSTEMS OPERATIONAL")
         logger.info("=" * 60)
         logger.info("📱 Send /help to your admin bot for commands")
-        logger.info("🔍 Monitoring for high-conviction signals...")
-        logger.info(f"🎯 Min conviction score: {MIN_CONVICTION_SCORE}")
-        logger.info("🎓 Helius webhook ready - configure at dashboard.helius.dev")
+        logger.info("🔍 Monitoring for signals...")
+        logger.info(f"🎯 Ultra-early signals: {MIN_EARLY_CONVICTION}+ (0-70% curve)")
+        logger.info(f"🎯 KOL early signal score: {MIN_CONVICTION_SCORE - 10}")
+        logger.info(f"🎯 Graduation signal score: {MIN_CONVICTION_SCORE}")
+        logger.info("🎓 Helius webhooks configured:")
+        logger.info("   • Graduation: /webhook/graduation")
+        logger.info("   • KOL wallets: /webhook/kol-transaction")
+        logger.info("   • Smart money: /webhook/smart-money (EARLY DETECTION)")
         logger.info("")
+        
+        # Start bonding monitor
+        await early_monitor.bonding_monitor.start()
         
         tasks = [
             asyncio.create_task(pumpfun.start(process_token)),
             asyncio.create_task(kol_tracker.start()),
+            asyncio.create_task(early_monitor.start()),  # NEW: Early detection system
             asyncio.create_task(performance_tracker.start()),
             asyncio.create_task(momentum_analyzer.start()),
             asyncio.create_task(outcome_tracker.start()),
@@ -330,6 +465,7 @@ async def main():
         
         await pumpfun.stop()
         await kol_tracker.stop()
+        await early_monitor.stop()  # NEW
         await performance_tracker.stop()
         await momentum_analyzer.stop()
         await outcome_tracker.stop()
