@@ -196,39 +196,53 @@ class KOLWalletTracker:
                 for token_mint, amount in bought_tokens:
                     logger.info(f"🎯 {wallet_info['name']} bought {token_mint[:8]}...")
                     
-                    # Check if this is a NEW KOL for this token
-                    previous_kol_count = len(self.recent_buys.get(token_mint, []))
-                    
-                    # Store the buy
+                    # Initialize list if needed
                     if token_mint not in self.recent_buys:
                         self.recent_buys[token_mint] = []
                     
-                    self.recent_buys[token_mint].append({
-                        'wallet': wallet_address,
-                        'kol_name': wallet_info['name'],
-                        'tier': wallet_info['tier'],
-                        'timestamp': datetime.now(),
-                        'amount': amount,
-                        'signature': signature
-                    })
+                    # Check if this wallet already has an entry for this token
+                    existing_buy = next(
+                        (b for b in self.recent_buys[token_mint] if b['wallet'] == wallet_address), 
+                        None
+                    )
                     
-                    current_kol_count = len(self.recent_buys[token_mint])
-                    
-                    # If this token has seen KOL activity before, and we have a callback, trigger it
-                    if previous_kol_count > 0 and current_kol_count > previous_kol_count:
-                        if self.existing_token_callback:
-                            # Check if we've already posted about this many KOLs
-                            last_posted_count = self.posted_kol_counts.get(token_mint, 0)
-                            
-                            if current_kol_count > last_posted_count:
-                                asyncio.create_task(
-                                    self.existing_token_callback(
-                                        token_mint, 
-                                        wallet_info['name'],
-                                        current_kol_count
+                    if existing_buy:
+                        # Update existing entry - same wallet buying more
+                        logger.debug(f"Updating existing buy for {wallet_info['name']} on {token_mint[:8]}...")
+                        existing_buy['timestamp'] = datetime.now()
+                        existing_buy['amount'] += amount
+                        existing_buy['signature'] = signature
+                        # Don't trigger callback for same wallet buying more
+                    else:
+                        # NEW wallet buying this token!
+                        previous_unique_kols = len(self.recent_buys[token_mint])
+                        
+                        self.recent_buys[token_mint].append({
+                            'wallet': wallet_address,
+                            'kol_name': wallet_info['name'],
+                            'tier': wallet_info['tier'],
+                            'timestamp': datetime.now(),
+                            'amount': amount,
+                            'signature': signature
+                        })
+                        
+                        current_unique_kols = len(self.recent_buys[token_mint])
+                        
+                        # Trigger callback only for NEW wallets on existing tokens
+                        if previous_unique_kols > 0 and current_unique_kols > previous_unique_kols:
+                            if self.existing_token_callback:
+                                # Check if we've already posted about this many unique KOLs
+                                last_posted_count = self.posted_kol_counts.get(token_mint, 0)
+                                
+                                if current_unique_kols > last_posted_count:
+                                    asyncio.create_task(
+                                        self.existing_token_callback(
+                                            token_mint, 
+                                            wallet_info['name'],
+                                            current_unique_kols
+                                        )
                                     )
-                                )
-                                self.posted_kol_counts[token_mint] = current_kol_count
+                                    self.posted_kol_counts[token_mint] = current_unique_kols
         
         except Exception as e:
             logger.debug(f"Error processing transaction: {e}")
@@ -317,7 +331,7 @@ class KOLWalletTracker:
         if not buys:
             return (0, [])
         
-        # Count top-tier vs tracked KOLs
+        # Count UNIQUE wallets only (buys list already deduplicated)
         top_kols = [b for b in buys if b['tier'] == 'top']
         tracked_kols = [b for b in buys if b['tier'] == 'tracked']
         
@@ -329,8 +343,12 @@ class KOLWalletTracker:
             top_boost = len(top_kols) * 15
             boost += top_boost
             
-            kol_names = [b['kol_name'] for b in top_kols]
-            reasons.append(f"{len(top_kols)} top KOL{'s' if len(top_kols) > 1 else ''}: {', '.join(kol_names[:3])}")
+            # Get unique KOL names (no duplicates)
+            kol_names = list(set([b['kol_name'] for b in top_kols]))
+            kol_names_str = ', '.join(kol_names[:3])  # Show max 3 names
+            
+            count_text = f"{len(top_kols)} top KOL" + ("s" if len(top_kols) > 1 else "")
+            reasons.append(f"{count_text}: {kol_names_str}")
         
         # Tracked KOLs get 5 points each
         if tracked_kols:
@@ -338,16 +356,16 @@ class KOLWalletTracker:
             boost += tracked_boost
             reasons.append(f"{len(tracked_kols)} tracked KOL{'s' if len(tracked_kols) > 1 else ''}")
         
-        # Confluence bonus: Multiple KOLs on same token
-        total_kols = len(buys)
-        if total_kols >= 3:
+        # Confluence bonus: Multiple unique KOLs on same token
+        total_unique_kols = len(buys)
+        if total_unique_kols >= 3:
             confluence_boost = 10
             boost += confluence_boost
-            reasons.append(f"Strong confluence ({total_kols} KOLs)")
-        elif total_kols >= 2:
+            reasons.append(f"Strong confluence ({total_unique_kols} KOLs)")
+        elif total_unique_kols >= 2:
             confluence_boost = 5
             boost += confluence_boost
-            reasons.append(f"Multiple KOLs ({total_kols})")
+            reasons.append(f"Multiple KOLs ({total_unique_kols})")
         
         # Cap total boost at 50 points
         boost = min(boost, 50)
