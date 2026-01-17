@@ -1,4 +1,4 @@
-        """
+"""
 KOL Wallet Tracker - Webhook-based monitoring (no polling!)
 """
 import os
