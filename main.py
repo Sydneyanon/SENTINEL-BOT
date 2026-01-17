@@ -116,7 +116,7 @@ async def main():
     logger.info("=" * 60)
     
     try:
-        db = Database(DB_PATH)
+        db = Database()
         await db.initialize()
         logger.info("✓ Database ready")
         
