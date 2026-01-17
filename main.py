@@ -185,7 +185,7 @@ async def main():
                         conviction_data = {
                             "symbol": pair.get("baseToken", {}).get("symbol", "UNKNOWN"),
                             "name": pair.get("baseToken", {}).get("name", ""),
-                            "score": score,
+                            "score": final_score,
                             "reasons": reasons,
                             "price": float(pair.get("priceUsd", 0)),
                             "liquidity_usd": token_data["liquidity_usd"],
@@ -196,7 +196,7 @@ async def main():
                         }
                         
                         logger.info(f"🚀 {conviction_data["symbol"]} scored {final_score:.0f}!")
-                        message_id = await publisher.post_signal(conviction_data, final_score, kol_boost)
+                        message_id = await publisher.post_signal(conviction_data)
                         
                         if message_id:
                             await db.add_signal(
