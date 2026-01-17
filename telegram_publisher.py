@@ -32,13 +32,18 @@ class TelegramPublisher:
         
         Args:
             token_data: Dict with token information
+            
+        Returns:
+            message_id: ID of the posted message
         """
         try:
-            message = self._format_signal_message(token_data)
-            await self.send_message(message)
+            message_text = self._format_signal_message(token_data)
+            message = await self.send_message(message_text)
             logger.info(f"✓ Posted signal for {token_data.get('symbol', 'UNKNOWN')}")
+            return message.message_id  # ✅ RETURN MESSAGE_ID!
         except Exception as e:
             logger.error(f"Error posting signal: {e}", exc_info=True)
+            return None
     
     async def send_message(self, message: str):
         """
@@ -46,14 +51,18 @@ class TelegramPublisher:
         
         Args:
             message: Message text (supports Markdown)
+            
+        Returns:
+            Message object from Telegram
         """
         try:
-            await self.bot.send_message(
+            sent_message = await self.bot.send_message(
                 chat_id=self.channel_id,
                 text=message,
                 parse_mode=ParseMode.MARKDOWN,
                 disable_web_page_preview=True
             )
+            return sent_message  # ✅ RETURN MESSAGE OBJECT!
         except Exception as e:
             logger.error(f"Error sending message: {e}", exc_info=True)
             raise
