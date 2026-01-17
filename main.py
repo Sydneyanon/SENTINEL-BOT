@@ -6,6 +6,7 @@ import os
 import sys
 import asyncio
 import signal
+from datetime import datetime, timedelta
 from loguru import logger
 from dotenv import load_dotenv
 from aiohttp import web
@@ -53,6 +54,20 @@ def signal_handler(signum, frame):
 # Register signal handlers
 signal.signal(signal.SIGTERM, signal_handler)
 signal.signal(signal.SIGINT, signal_handler)
+
+
+async def daily_recap_task(performance_tracker):
+    """Run daily recap at midnight"""
+    while True:
+        now = datetime.now()
+        # Calculate seconds until next midnight
+        tomorrow = now + timedelta(days=1)
+        midnight = tomorrow.replace(hour=0, minute=0, second=0, microsecond=0)
+        seconds_until_midnight = (midnight - now).total_seconds()
+        
+        logger.info(f"Next daily recap in {seconds_until_midnight/3600:.1f} hours")
+        await asyncio.sleep(seconds_until_midnight)
+        await performance_tracker.post_daily_recap()
 
 
 async def health_check_server():
@@ -256,6 +271,7 @@ async def main():
                             "liquidity_usd": token_data["liquidity_usd"],
                             "volume_24h": token_data["volume_24h"],
                             "price_change_24h": token_data["price_change_24h"],
+                            "market_cap": token_data["market_cap"],
                             "pair_address": pair.get("pairAddress", ""),
                             "dex_url": pair.get("url", "")
                         }
@@ -303,6 +319,7 @@ async def main():
             asyncio.create_task(performance_tracker.start()),
             asyncio.create_task(momentum_analyzer.start()),
             asyncio.create_task(outcome_tracker.start()),
+            asyncio.create_task(daily_recap_task(performance_tracker)),
         ]
         
         await shutdown_event.wait()
