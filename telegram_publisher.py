@@ -40,7 +40,7 @@ class TelegramPublisher:
             message_text = self._format_signal_message(token_data)
             message = await self.send_message(message_text)
             logger.info(f"✓ Posted signal for {token_data.get('symbol', 'UNKNOWN')}")
-            return message.message_id  # ✅ RETURN MESSAGE_ID!
+            return message.message_id
         except Exception as e:
             logger.error(f"Error posting signal: {e}", exc_info=True)
             return None
@@ -62,13 +62,13 @@ class TelegramPublisher:
                 parse_mode=ParseMode.MARKDOWN,
                 disable_web_page_preview=True
             )
-            return sent_message  # ✅ RETURN MESSAGE OBJECT!
+            return sent_message
         except Exception as e:
             logger.error(f"Error sending message: {e}", exc_info=True)
             raise
     
     def _format_signal_message(self, token_data: dict) -> str:
-        """Format a signal into a Telegram message"""
+        """Format a signal into a clean, professional Telegram message"""
         
         symbol = token_data.get('symbol', 'UNKNOWN')
         name = token_data.get('name', 'Unknown')
@@ -80,26 +80,48 @@ class TelegramPublisher:
         volume = token_data.get('volume_24h', 0)
         price_change = token_data.get('price_change_24h', 0)
         
-        # Build message
-        message = f"""**NEW SIGNAL**
-Token: ${symbol}
-Conviction: {conviction}/100
+        # Determine conviction emoji and label
+        if conviction >= 90:
+            conviction_emoji = "🔥"
+            conviction_label = "VERY HIGH"
+        elif conviction >= 80:
+            conviction_emoji = "⚡"
+            conviction_label = "HIGH"
+        elif conviction >= 70:
+            conviction_emoji = "✨"
+            conviction_label = "STRONG"
+        else:
+            conviction_emoji = "📊"
+            conviction_label = "MODERATE"
+        
+        # Format market cap if available
+        mc = token_data.get('market_cap', 0)
+        mc_line = f"💰 Market Cap: ${mc:,.0f}\n" if mc > 0 else ""
+        
+        # Build clean message with sections
+        message = f"""🚨 **SENTINEL SIGNAL** {conviction_emoji}
 
-**Details:**
-Price: ${price:.10f}
-Liquidity: ${liquidity:,.0f}
-24h Volume: ${volume:,.0f}
-24h Change: {price_change:+.1f}%
+**${symbol}**
+━━━━━━━━━━━━━━━━━━━━━━━
 
-**Reasons:**
+📊 **Conviction Score:** {conviction}/100 ({conviction_label})
+
+💵 **Price:** ${price:.10f}
+{mc_line}💧 **Liquidity:** ${liquidity:,.0f}
+📈 **24h Volume:** ${volume:,.0f}
+{"🔥" if price_change > 0 else "📉"} **24h Change:** {price_change:+.1f}%
+
+📋 **Why This Signal:**
 """
         
-        # Add conviction reasons
-        for reason in reasons[:5]:  # Max 5 reasons
-            message += f"• {reason}\n"
+        # Add conviction reasons with clean bullets
+        for i, reason in enumerate(reasons[:5], 1):
+            message += f"  {i}. {reason}\n"
         
-        # Add links
-        message += f"\n[View on DexScreener](https://dexscreener.com/solana/{address})\n"
-        message += f"`{address}`"
+        # Add contract address section
+        message += f"\n📝 **Contract Address:**\n`{address}`\n"
+        
+        # Add action buttons
+        message += f"\n🔗 [View Chart](https://dexscreener.com/solana/{address})"
         
         return message.strip()
