@@ -1,5 +1,5 @@
 """
-Sentinel Signals - Main Bot Entry Point  
+Sentinel Signals - Main Bot Entry Point
 Monitors pump.fun graduations + Helius webhooks + KOL wallets
 """
 import os
@@ -10,8 +10,10 @@ from loguru import logger
 from dotenv import load_dotenv
 from aiohttp import web
 
+# Load environment variables
 load_dotenv()
 
+# Import all components
 from database import Database
 from telegram_publisher import TelegramPublisher
 from pumpfun_monitor import PumpfunMonitor
@@ -23,20 +25,25 @@ from outcome_tracker import OutcomeTracker
 from telegram_admin_bot import TelegramAdminBot
 from conviction_filter import ConvictionFilter
 
-TELEGRAM_BOT_TOKEN = os.getenv('TELEGRAM_BOT_TOKEN')
-TELEGRAM_CHANNEL_ID = os.getenv('TELEGRAM_CHANNEL_ID')
-ADMIN_BOT_TOKEN = os.getenv('ADMIN_BOT_TOKEN')
-DB_PATH = os.getenv('DB_PATH', 'sentinel.db')
-PORT = int(os.getenv('PORT', 8080))
-MIN_CONVICTION_SCORE = float(os.getenv('MIN_CONVICTION_SCORE', 70))
+# Configuration
+TELEGRAM_BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN")
+TELEGRAM_CHANNEL_ID = os.getenv("TELEGRAM_CHANNEL_ID")
+ADMIN_BOT_TOKEN = os.getenv("ADMIN_BOT_TOKEN")
+DB_PATH = os.getenv("DB_PATH", "sentinel.db")
+PORT = int(os.getenv("PORT", 8080))
+MIN_CONVICTION_SCORE = float(os.getenv("MIN_CONVICTION_SCORE", 70))
 
+# Global shutdown flag
 shutdown_event = asyncio.Event()
+
+# Global graduation monitor for webhook access
 graduation_monitor = None
 
 def signal_handler(signum, frame):
     logger.info(f"Received signal {signum}, initiating shutdown...")
     shutdown_event.set()
 
+# Register signal handlers
 signal.signal(signal.SIGTERM, signal_handler)
 signal.signal(signal.SIGINT, signal_handler)
 
@@ -48,30 +55,31 @@ async def health_check_server():
     async def helius_webhook(request):
         try:
             data = await request.json()
-            logger.info(f"📥 Webhook: {len(data) if isinstance(data, list) else 1} tx")
+            logger.info(f"📥 Received Helius webhook: {len(data) if isinstance(data, list) else 1} transaction(s)")
             
             if graduation_monitor:
                 await graduation_monitor.process_webhook(data)
                 return web.Response(text="OK", status=200)
             else:
+                logger.warning("Graduation monitor not initialized")
                 return web.Response(text="Monitor not ready", status=503)
                 
         except Exception as e:
-            logger.error(f"Webhook error: {e}", exc_info=True)
+            logger.error(f"Error processing webhook: {e}", exc_info=True)
             return web.Response(text="Error", status=500)
     
     app = web.Application()
-    app.router.add_get('/health', health)
-    app.router.add_get('/', health)
-    app.router.add_post('/webhook/graduation', helius_webhook)
+    app.router.add_get("/health", health)
+    app.router.add_get("/", health)
+    app.router.add_post("/webhook/graduation", helius_webhook)
     
     runner = web.AppRunner(app)
     await runner.setup()
-    site = web.TCPSite(runner, '0.0.0.0', PORT)
+    site = web.TCPSite(runner, "0.0.0.0", PORT)
     await site.start()
     
-    logger.info(f"✓ Health check server on port {PORT}")
-    logger.info(f"✓ Webhook: POST /webhook/graduation")
+    logger.info(f"✓ Health check server started on port {PORT}")
+    logger.info(f"✓ Webhook endpoint: POST /webhook/graduation")
 
 
 async def main():
@@ -90,21 +98,23 @@ async def main():
         logger.info("✓ Telegram publisher ready")
         
         conviction_filter = ConvictionFilter()
-        logger.info(f"✓ Conviction filter (min: {MIN_CONVICTION_SCORE})")
+        logger.info(f"✓ Conviction filter ready (min score: {MIN_CONVICTION_SCORE})")
         
         pumpfun = PumpfunMonitor()
-        logger.info("✓ PumpFun monitor (WebSocket)")
+        logger.info("✓ PumpFun monitor ready (WebSocket)")
         
         graduation_monitor = HeliusGraduationMonitor()
-        logger.info("✓ Helius monitor (Webhook)")
+        logger.info("✓ Helius graduation monitor ready (Webhook)")
         
         kol_tracker = KOLWalletTracker()
-        logger.info("✓ KOL tracker")
+        logger.info("✓ KOL wallet tracker ready")
         
         performance_tracker = PerformanceTracker(db, publisher)
         momentum_analyzer = MomentumAnalyzer(db, publisher)
         outcome_tracker = OutcomeTracker(db)
-        logger.info("✓ Trackers ready")
+        logger.info("✓ Performance tracker ready")
+        logger.info("✓ Momentum analyzer ready")
+        logger.info("✓ Outcome tracker ready")
         
         admin_bot = None
         if ADMIN_BOT_TOKEN:
@@ -116,54 +126,35 @@ async def main():
         
         async def process_token(token_mint: str):
             try:
-                # Duplicate check
                 try:
                     existing = await db.get_signal(token_mint)
                     if existing:
+                        logger.debug(f"Token {token_mint} already processed, skipping")
                         return
                 except AttributeError:
                     pass
                 
-                logger.info(f"🔍 Processing: {token_mint[:8]}...")
+                logger.info(f"🔍 Processing token: {token_mint}")
                 
                 import aiohttp
                 async with aiohttp.ClientSession() as session:
                     url = f"https://api.dexscreener.com/latest/dex/tokens/{token_mint}"
                     async with session.get(url) as resp:
                         if resp.status != 200:
-                            logger.warning(f"DexScreener {resp.status}")
+                            logger.warning(f"DexScreener returned {resp.status} for {token_mint}")
                             return
                         
                         data = await resp.json()
                         pairs = data.get("pairs", [])
                         
                         if not pairs:
-                            logger.info(f"❌ No pairs")
+                            logger.info(f"❌ No DEX data for {token_mint}")
                             return
                         
                         pair = pairs[0]
                         
-                        # SANITY CHECK 1: Valid symbol
-                        symbol = pair.get("baseToken", {}).get("symbol", "")
-                        if not symbol or symbol == "UNKNOWN":
-                            logger.warning(f"❌ Invalid symbol")
-                            return
-                        
-                        # SANITY CHECK 2: Valid price
-                        price = float(pair.get("priceUsd", 0))
-                        if price == 0:
-                            logger.warning(f"❌ {symbol}: No price data")
-                            return
-                        
-                        # SANITY CHECK 3: Minimum liquidity
-                        liquidity = float(pair.get("liquidity", {}).get("usd", 0))
-                        if liquidity < 5000:
-                            logger.info(f"❌ {symbol}: Low liquidity ${liquidity:,.0f}")
-                            return
-                        
-                        # Build token data
                         token_data = {
-                            "liquidity_usd": liquidity,
+                            "liquidity_usd": float(pair.get("liquidity", {}).get("usd", 0)),
                             "volume_24h": float(pair.get("volume", {}).get("h24", 0)),
                             "price_change_24h": float(pair.get("priceChange", {}).get("h24", 0)),
                             "txns_24h_buys": int(pair.get("txns", {}).get("h24", {}).get("buys", 0)),
@@ -172,78 +163,69 @@ async def main():
                             "signal_type": "graduated"
                         }
                         
-                        # Calculate score
                         score, reasons = conviction_filter.calculate_conviction_score(token_data)
                         
-                        logger.info(f"📊 {symbol}: score={score:.0f}, reasons={len(reasons)}")
+                        # Check KOL involvement (if tracker has the method)
+                        kol_boost = 0
+                        try:
+                            if hasattr(kol_tracker, 'get_kol_buy_boost'):
+                                kol_boost, kol_reasons = kol_tracker.get_kol_buy_boost(token_mint)
+                                if kol_boost > 0:
+                                    reasons.extend(kol_reasons)
+                                    logger.info(f"🎯 KOL boost: +{kol_boost} ({', '.join(kol_reasons)})")
+                        except Exception as e:
+                            logger.debug(f"KOL boost check failed: {e}")
                         
-                        # SANITY CHECK 4: Minimum base score
-                        if score < 30:
-                            logger.info(f"📉 {symbol}: Base score too low ({score:.0f})")
-                            return
-                        
-                        # SANITY CHECK 5: Must have reasons
-                        if not reasons:
-                            logger.warning(f"❌ {symbol}: No scoring reasons!")
-                            return
-                        
-                        # Check KOL boost
-                        kol_boost = kol_tracker.get_kol_boost(token_mint)
                         final_score = score + kol_boost
                         
-                        if kol_boost > 0:
-                            logger.info(f"🎯 KOL boost: +{kol_boost}")
-                        
-                        # SANITY CHECK 6: Final score threshold
                         if final_score < MIN_CONVICTION_SCORE:
-                            logger.info(f"📉 {symbol}: {final_score:.0f} < {MIN_CONVICTION_SCORE}")
+                            logger.info(f"📉 {pair.get("baseToken", {}).get("symbol", "UNKNOWN")} scored {final_score:.0f} (below {MIN_CONVICTION_SCORE})")
                             return
                         
-                        logger.info(f"✅ {symbol} PASSED - posting signal!")
-                        
-                        # Build conviction data
                         conviction_data = {
-                            "symbol": symbol,
+                            "symbol": pair.get("baseToken", {}).get("symbol", "UNKNOWN"),
                             "name": pair.get("baseToken", {}).get("name", ""),
-                            "score": final_score,  # Use final_score here!
+                            "score": final_score,
                             "reasons": reasons,
-                            "price": price,
-                            "liquidity_usd": liquidity,
+                            "price": float(pair.get("priceUsd", 0)),
+                            "liquidity_usd": token_data["liquidity_usd"],
                             "volume_24h": token_data["volume_24h"],
                             "price_change_24h": token_data["price_change_24h"],
                             "pair_address": pair.get("pairAddress", ""),
                             "dex_url": pair.get("url", "")
                         }
                         
-                        # Post signal
-                        message_id = await publisher.post_signal(conviction_data, final_score, kol_boost)
+                        logger.info(f"🚀 {conviction_data["symbol"]} scored {final_score:.0f}!")
+                        message_id = await publisher.post_signal(conviction_data)
                         
                         if message_id:
                             await db.add_signal(
                                 token_mint,
-                                symbol,
+                                conviction_data["symbol"],
                                 conviction_data.get("name", ""),
                                 final_score,
-                                price,
-                                liquidity,
-                                token_data["volume_24h"],
+                                conviction_data["price"],
+                                conviction_data["liquidity_usd"],
+                                conviction_data["volume_24h"],
                                 conviction_data["pair_address"],
                                 message_id
                             )
                             
                             await performance_tracker.track_token(token_mint)
-                            logger.info(f"✅ Tracking {symbol}")
+                            logger.info(f"✅ Tracking started for {conviction_data["symbol"]}")
                     
             except Exception as e:
-                logger.error(f"Error: {e}", exc_info=True)
+                logger.error(f"Error processing {token_mint}: {e}", exc_info=True)
         
         graduation_monitor.set_callback(process_token)
         
         logger.info("=" * 60)
         logger.info("🚀 ALL SYSTEMS OPERATIONAL")
         logger.info("=" * 60)
-        logger.info(f"🎯 Min conviction: {MIN_CONVICTION_SCORE}")
-        logger.info("🎓 Helius webhook active")
+        logger.info("📱 Send /help to your admin bot for commands")
+        logger.info("🔍 Monitoring for high-conviction signals...")
+        logger.info(f"🎯 Min conviction score: {MIN_CONVICTION_SCORE}")
+        logger.info("🎓 Helius webhook ready - configure at dashboard.helius.dev")
         logger.info("")
         
         tasks = [
@@ -256,7 +238,7 @@ async def main():
         
         await shutdown_event.wait()
         
-        logger.info("Shutting down...")
+        logger.info("Shutting down gracefully...")
         for task in tasks:
             task.cancel()
         
@@ -272,7 +254,7 @@ async def main():
         logger.info("✅ Shutdown complete")
     
     except Exception as e:
-        logger.critical(f"Fatal: {e}", exc_info=True)
+        logger.critical(f"Fatal error: {e}", exc_info=True)
         sys.exit(1)
 
 
@@ -280,5 +262,5 @@ if __name__ == "__main__":
     try:
         asyncio.run(main())
     except KeyboardInterrupt:
-        logger.info("Interrupted")
+        logger.info("Interrupted by user")
         sys.exit(0)
