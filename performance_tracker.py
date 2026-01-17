@@ -1,4 +1,4 @@
-"""
+      """
 Performance Tracker - Monitors posted signals for milestone achievements AND metric changes
 """
 
@@ -155,20 +155,25 @@ class PerformanceTracker:
             return None
     
     async def _fetch_holder_count(self, address: str) -> Optional[int]:
-        """Fetch holder count from Birdeye"""
+        """Fetch holder count from Birdeye v3 API"""
         if not BIRDEYE_API_KEY:
             return None
         
         try:
-            url = f"https://public-api.birdeye.so/defi/token_overview?address={address}"
-            headers = {"X-API-KEY": BIRDEYE_API_KEY}
+            url = f"https://public-api.birdeye.so/defi/v3/token/holder?address={address}"
+            headers = {
+                "X-API-KEY": BIRDEYE_API_KEY,
+                "x-chain": "solana"
+            }
             
             async with self.session.get(url, headers=headers, timeout=10) as resp:
                 if resp.status != 200:
                     return None
                 
                 data = await resp.json()
-                holder_count = data.get('data', {}).get('holder', 0)
+                
+                # v3 API structure: data.total
+                holder_count = data.get('data', {}).get('total', 0)
                 
                 return int(holder_count) if holder_count else None
         
